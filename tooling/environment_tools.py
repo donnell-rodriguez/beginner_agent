@@ -4,6 +4,7 @@ from pathlib import Path
 from shutil import which
 
 from .core import REPO_ROOT, active_project_root, json_dumps
+from .runtime import runtime_catalog
 
 
 # 中文注释：
@@ -90,6 +91,7 @@ def detect_project_stack_tool() -> str:
                 "python": bool(list(project_root.glob("**/*.py"))),
                 "rust": active_root_cargo or bool(list(project_root.glob("**/*.rs"))),
             },
+            "runtime_catalog": runtime_catalog(),
             "detected_files": {
                 "pyproject": pyprojects[:20],
                 "uv_lock": uv_locks[:20],

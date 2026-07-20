@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 from shutil import which
@@ -8,14 +7,12 @@ from typing import Any
 
 from .core import (
     MAX_TOOL_OUTPUT_CHARS,
-    REPO_ROOT,
-    STATE_DIR,
     active_project_root,
-    ensure_state_dirs,
     json_dumps,
     safe_resolve,
     truncate,
 )
+from .runtime import resolve_command_runtime, runtime_catalog
 
 
 # 中文注释：
@@ -32,13 +29,15 @@ from .core import (
 ALLOWED_COMMANDS: dict[str, dict[str, Any]] = {
     "python_compileall": {
         "cmd": ["python3", "-B", "-m", "compileall", "beginner_agent"],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 30,
         "writes_cache": True,
     },
     "python_compile_state": {
         "cmd": ["python3", "-B", "-m", "py_compile", "beginner_agent/state.py"],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 15,
         "writes_cache": False,
     },
@@ -54,36 +53,42 @@ ALLOWED_COMMANDS: dict[str, dict[str, Any]] = {
             "-c",
             "from beginner_agent.graph import build_graph; print(type(build_graph()).__name__)",
         ],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 30,
         "writes_cache": True,
     },
     "ruff_check": {
         "cmd": ["ruff", "check", "beginner_agent"],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 30,
         "writes_cache": False,
     },
     "ruff_format_check": {
         "cmd": ["ruff", "format", "--check", "beginner_agent"],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 30,
         "writes_cache": False,
     },
     "mypy_beginner_agent": {
         "cmd": ["mypy", "beginner_agent"],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 45,
         "writes_cache": True,
     },
     "pytest_beginner_agent": {
         "cmd": ["python3", "-B", "-m", "pytest", "beginner_agent"],
-        "cwd": REPO_ROOT,
+        "runtime": "python",
+        "cwd": "repo_root",
         "timeout": 60,
         "writes_cache": True,
     },
     "cargo_check": {
         "cmd": ["cargo", "check"],
+        "runtime": "rust",
         "cwd": "active_project",
         "timeout": 90,
         "writes_cache": True,
@@ -91,6 +96,7 @@ ALLOWED_COMMANDS: dict[str, dict[str, Any]] = {
     },
     "cargo_test": {
         "cmd": ["cargo", "test"],
+        "runtime": "rust",
         "cwd": "active_project",
         "timeout": 120,
         "writes_cache": True,
@@ -98,6 +104,7 @@ ALLOWED_COMMANDS: dict[str, dict[str, Any]] = {
     },
     "cargo_clippy": {
         "cmd": ["cargo", "clippy", "--", "-D", "warnings"],
+        "runtime": "rust",
         "cwd": "active_project",
         "timeout": 120,
         "writes_cache": True,
@@ -105,6 +112,7 @@ ALLOWED_COMMANDS: dict[str, dict[str, Any]] = {
     },
     "cargo_fmt_check": {
         "cmd": ["cargo", "fmt", "--check"],
+        "runtime": "rust",
         "cwd": "active_project",
         "timeout": 60,
         "writes_cache": False,
@@ -134,7 +142,10 @@ def _run_profile(profile: str) -> dict[str, Any]:
         }
 
     cmd = list(spec["cmd"])
-    cwd = active_project_root() if spec["cwd"] == "active_project" else spec["cwd"]
+    resolved_runtime = resolve_command_runtime(spec)
+    cwd = resolved_runtime["cwd"]
+    env = resolved_runtime["env"]
+    runtime_name = resolved_runtime["runtime"]
     required_file = spec.get("requires")
     if required_file and not (cwd / str(required_file)).exists():
         return {
@@ -153,23 +164,6 @@ def _run_profile(profile: str) -> dict[str, Any]:
         }
 
     started = time.monotonic()
-    ensure_state_dirs()
-    env = None
-    if cmd[0] == "uv":
-        # 中文注释：
-        # uv 默认会访问用户目录 ~/.cache/uv。
-        # 在受控 agent 环境里，这可能被沙箱拒绝。
-        # 所以这里把 uv cache 放到 beginner_agent/.agent_state/uv-cache。
-        env = {**os.environ, "UV_CACHE_DIR": (STATE_DIR / "uv-cache").as_posix()}
-    elif cmd[0] == "cargo":
-        # 中文注释：
-        # cargo 默认会访问 ~/.cargo。
-        # 这里把 Cargo home 放到 agent 状态目录，避免工具写用户全局目录。
-        env = {
-            **os.environ,
-            "CARGO_HOME": (STATE_DIR / "cargo-home").as_posix(),
-            "CARGO_TARGET_DIR": (STATE_DIR / "cargo-target").as_posix(),
-        }
     try:
         result = subprocess.run(
             cmd,
@@ -204,6 +198,7 @@ def _run_profile(profile: str) -> dict[str, Any]:
         "profile": profile,
         "cmd": cmd,
         "cwd": str(cwd),
+        "runtime": runtime_name,
         "returncode": result.returncode,
         "elapsed_ms": elapsed_ms,
         "stdout": truncate(stdout, MAX_TOOL_OUTPUT_CHARS),
@@ -215,15 +210,20 @@ def _run_profile(profile: str) -> dict[str, Any]:
 def list_allowed_commands_tool() -> str:
     """列出 Agent 允许执行的命令 profile。"""
 
+    commands: dict[str, dict[str, Any]] = {}
+    for profile, spec in ALLOWED_COMMANDS.items():
+        resolved_runtime = resolve_command_runtime(spec)
+        commands[profile] = {
+            "cmd": spec["cmd"],
+            "runtime": resolved_runtime["runtime"],
+            "cwd": str(resolved_runtime["cwd"]),
+            "timeout": spec.get("timeout", 30),
+            "writes_cache": bool(spec.get("writes_cache", False)),
+        }
     return json_dumps(
         {
-            profile: {
-                "cmd": spec["cmd"],
-                "cwd": str(active_project_root() if spec["cwd"] == "active_project" else spec["cwd"]),
-                "timeout": spec.get("timeout", 30),
-                "writes_cache": bool(spec.get("writes_cache", False)),
-            }
-            for profile, spec in ALLOWED_COMMANDS.items()
+            "commands": commands,
+            "runtime_catalog": runtime_catalog(),
         }
     )
 
