@@ -250,6 +250,28 @@ def run_case(user_input: str) -> None:
             "patch_history": [],
 
             # 中文注释：
+            # execution_status 是 Executor 层的执行状态。
+            # 它和 tool_result_status 不一样：
+            #   tool_result_status 看工具结果。
+            #   execution_status 看执行过程，例如是否超预算、是否长任务。
+            "execution_status": "not_started",
+
+            # 中文注释：
+            # active_execution 保存当前或最近一次执行摘要。
+            # 后续如果接后台任务队列，这里可以保存 job_id / worker_id。
+            "active_execution": {},
+
+            # 中文注释：
+            # execution_attempts 保存所有工具执行尝试记录。
+            # 它在 State 里是 Annotated[list, add]，所以每次会自动追加。
+            "execution_attempts": [],
+
+            # 中文注释：
+            # max_tool_duration_ms 是工具执行预算。
+            # 当前同步工具不能被强制中断，但 Executor 会标记是否超过预算。
+            "max_tool_duration_ms": 30000,
+
+            # 中文注释：
             # human_approvals 模拟人工审批。
             #
             # 写工具 apply_patch / rollback 默认不会自动执行。

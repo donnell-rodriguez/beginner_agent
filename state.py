@@ -436,6 +436,48 @@ class State(TypedDict):
     patch_history: Annotated[list, add]
 
     # 中文注释：
+    # execution_status 表示 Executor 这一层的执行状态。
+    #
+    # 注意它和 tool_result_status 不完全一样：
+    # - tool_result_status 关注“工具结果是否成功”。
+    # - execution_status 关注“执行过程是否正常、是否超时、是否需要等待”。
+    #
+    # 例如：
+    # - 工具最终成功，但耗时超过预算，可以是 completed_over_budget。
+    # - 工具被权限/参数拦截，可以是 blocked。
+    # - 未来接入后台任务队列时，可以扩展成 waiting_external。
+    execution_status: Literal[
+        "not_started",
+        "completed",
+        "completed_over_budget",
+        "failed",
+        "blocked",
+        "waiting_external",
+    ]
+
+    # 中文注释：
+    # active_execution 保存当前正在执行或最近一次执行的摘要。
+    #
+    # 它类似生产系统里的 job/run record：
+    # 记录 task_id、tool_name、开始时间、结束时间、耗时、是否长任务工具等。
+    active_execution: dict[str, Any]
+
+    # 中文注释：
+    # execution_attempts 保存所有执行尝试记录。
+    #
+    # 它是 Annotated[list, add]，所以每次 Executor 返回一条 attempt，
+    # LangGraph 会自动追加，而不是覆盖旧记录。
+    execution_attempts: Annotated[list, add]
+
+    # 中文注释：
+    # max_tool_duration_ms 是工具执行预算。
+    #
+    # 当前工具还是同步执行，所以这个字段不能强行杀掉正在运行的工具。
+    # 它的作用是：执行完成后判断是否超过预算，并把结果交给 Evaluator。
+    # 后续接后台 worker 时，可以把它变成真正的 timeout / cancellation 策略。
+    max_tool_duration_ms: int
+
+    # 中文注释：
     # human_approvals 模拟人工审批结果。
     #
     # key 是 task_id，value 是 True / False。

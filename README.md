@@ -290,6 +290,8 @@ executor.py -> executor_node(...)
 写入 tool_result_status
 区分 success / failed / blocked / empty / partial
 记录 duration_ms / retryable / validation / metadata / changed_files
+生成 execution_attempts，记录每次执行尝试
+写入 execution_status，区分执行过程是否正常、失败、blocked、超预算
 ```
 
 ToolResult 的作用：
@@ -299,6 +301,58 @@ tool_result       给人看的字符串输出
 tool_result_data  给机器看的结构化结果
 
 Evaluator / Memory / Audit 后续应该优先读取 tool_result_data。
+```
+
+Execution Attempt 的作用：
+
+```text
+executor.py 现在不只是“调用工具然后返回字符串”。
+它会把每一次工具调用记录成一次 execution attempt：
+
+attempt_id           本次执行尝试 id
+task_id              对应哪个任务
+tool_name            执行哪个工具
+tool_args            工具参数
+execution_mode       sync / long_running_sync
+execution_status     completed / completed_over_budget / failed / blocked
+duration_ms          实际耗时
+budget_ms            本次执行预算
+over_budget          是否超过预算
+retryable            是否建议重试
+tool_result_data     工具结构化结果
+```
+
+为什么需要这一层：
+
+```text
+真实 code agent 里的执行不是只有一种情况：
+
+1. 立即完成
+   例如 read_file、list_files。
+
+2. 需要较长时间
+   例如 run_tests、run_build、cargo test。
+
+3. 执行失败
+   例如参数错误、测试失败、命令失败。
+
+4. 被权限层拦截
+   例如 apply_patch 没有人类审批。
+
+5. 未来可能进入后台等待
+   例如把长任务提交给 worker，然后轮询 job_id。
+
+当前 beginner_agent 仍然是同步工具执行。
+所以它不会真的启动后台 worker，也不会真正异步等待。
+但是 active_execution / execution_attempts / execution_status 已经把接口预留出来。
+
+后续如果升级成大厂式执行平台，可以把：
+
+sync / long_running_sync
+
+替换成：
+
+async_job + job_id + polling + cancel + resume
 ```
 
 当前工具：
@@ -730,6 +784,10 @@ tool_args            当前工具参数
 tool_result          最近一次工具结果
 tool_result_data     Pydantic ToolResult 的 dict，保存结构化工具结果
 tool_result_status   success / failed / blocked / empty / partial / none
+execution_status     Executor 视角的执行状态，例如 completed / completed_over_budget
+active_execution     当前或最近一次执行尝试摘要
+execution_attempts   所有工具执行尝试记录，会自动追加
+max_tool_duration_ms 单次工具执行预算，当前用于标记超预算
 
 max_steps            最大循环轮数
 max_depth            最大任务树深度
