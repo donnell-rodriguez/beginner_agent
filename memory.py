@@ -147,6 +147,36 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_kind
+                ON beginner_agent_memory (kind)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_task_id
+                ON beginner_agent_memory (task_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tool_status
+                ON beginner_agent_memory (tool_name, tool_result_status)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_created_at
+                ON beginner_agent_memory (created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tags
+                ON beginner_agent_memory USING GIN (tags)
+                """
+            )
 
     def list_records(self, limit: int) -> list[dict[str, Any]]:
         self._ensure_table()

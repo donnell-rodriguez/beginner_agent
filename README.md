@@ -448,6 +448,47 @@ main.py  -> config={"configurable": {"thread_id": "..."}}
    如果 Postgres 连接失败，会安全回退到 JSONL，并在 memory_context.backend_error 里记录原因。
 ```
 
+### Local Docker Postgres
+
+本项目已经提供本地 Docker Postgres 配置：
+
+```text
+docker-compose.yml
+.env.example
+scripts/check_postgres_memory.py
+```
+
+启动 Postgres：
+
+```bash
+docker compose up -d postgres
+```
+
+默认连接信息：
+
+```text
+DATABASE_URL=postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent
+BEGINNER_AGENT_MEMORY_BACKEND=postgres
+```
+
+验证 memory 后端是否真的写入 Postgres：
+
+```bash
+DATABASE_URL=postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent \
+uv run python scripts/check_postgres_memory.py
+```
+
+PostgresMemoryStore 会自动创建：
+
+```text
+beginner_agent_memory 表
+idx_beginner_agent_memory_kind
+idx_beginner_agent_memory_task_id
+idx_beginner_agent_memory_tool_status
+idx_beginner_agent_memory_created_at
+idx_beginner_agent_memory_tags
+```
+
 ## 关键 State 字段
 
 ```text
