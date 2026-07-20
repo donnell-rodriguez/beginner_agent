@@ -489,6 +489,51 @@ idx_beginner_agent_memory_created_at
 idx_beginner_agent_memory_tags
 ```
 
+### Local Vector Memory
+
+本项目现在使用 Postgres + pgvector 作为本地向量数据库：
+
+```text
+docker-compose.yml 使用 pgvector/pgvector:pg16
+memory.py 自动创建 vector extension
+memory.py 自动创建 beginner_agent_memory_embeddings 表
+embeddings.py 提供 EmbeddingProvider 抽象
+```
+
+重要说明：
+
+```text
+Qwen3-ASR-1.7B-bf16 是 ASR 语音识别模型，不是向量数据库，也不是 embedding 模型。
+
+向量数据库：Postgres + pgvector
+向量生成：EmbeddingProvider
+默认测试 provider：HashEmbeddingProvider
+可选本地模型 provider：OmlxEmbeddingProvider
+```
+
+验证 pgvector 是否真的可写可查：
+
+```bash
+docker compose up -d postgres
+uv run python scripts/check_vector_memory.py
+```
+
+默认 embedding 配置：
+
+```text
+BEGINNER_AGENT_EMBEDDING_PROVIDER=hash
+BEGINNER_AGENT_EMBEDDING_DIM=384
+```
+
+如果你的 OMLX 后续提供真正的 embedding 模型和 `/v1/embeddings` 接口，可以切换：
+
+```text
+BEGINNER_AGENT_EMBEDDING_PROVIDER=omlx
+OMLX_BASE_URL=http://127.0.0.1:8000/v1
+OMLX_API_KEY=local-omlx-key
+OMLX_EMBEDDING_MODEL=your-local-embedding-model
+```
+
 ## 关键 State 字段
 
 ```text

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from .embeddings import safe_embedding, vector_to_sql
 from .node_utils import goal_progress_snapshot
 from .state import State
 from .tooling.core import STATE_DIR, ensure_state_dirs
@@ -89,6 +90,9 @@ class MemoryStore(Protocol):
     def upsert_record(self, record: MemoryRecord) -> None:
         """插入或更新一条记忆记录。"""
 
+    def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
+        """语义检索相似记忆。"""
+
 
 class JsonlMemoryStore:
     """本地 JSONL memory store。"""
@@ -100,6 +104,9 @@ class JsonlMemoryStore:
 
     def upsert_record(self, record: MemoryRecord) -> None:
         _upsert_jsonl_memory_record(record.model_dump(mode="json"))
+
+    def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
+        return []
 
 
 class PostgresMemoryStore:
@@ -127,6 +134,7 @@ class PostgresMemoryStore:
 
     def _ensure_table(self) -> None:
         with self._connect() as conn:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS beginner_agent_memory (
@@ -175,6 +183,40 @@ class PostgresMemoryStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tags
                 ON beginner_agent_memory USING GIN (tags)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS beginner_agent_memory_embeddings (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL REFERENCES beginner_agent_memory(id) ON DELETE CASCADE,
+                    embedding_model TEXT NOT NULL,
+                    embedding_provider TEXT NOT NULL,
+                    embedding_dim INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    embedding VECTOR(384) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_embeddings_memory_id
+                ON beginner_agent_memory_embeddings (memory_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_embeddings_model
+                ON beginner_agent_memory_embeddings (embedding_provider, embedding_model)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_embeddings_vector
+                ON beginner_agent_memory_embeddings
+                USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 20)
                 """
             )
 
@@ -253,12 +295,146 @@ class PostgresMemoryStore:
                     "metadata": json.dumps(data["metadata"], ensure_ascii=False),
                 },
             )
+        self.upsert_embedding(record)
+
+    def upsert_embedding(self, record: MemoryRecord) -> None:
+        """为 MemoryRecord 写入 pgvector embedding。"""
+
+        embedding_text = _embedding_text_for_record(record)
+        vector, provider_name, model_name, dimension = safe_embedding(embedding_text)
+        if dimension != 384:
+            # 中文注释：
+            # 当前 Docker pgvector 表固定 VECTOR(384)。
+            # 如果你换了真实 embedding 模型，需要同步修改表维度和环境变量。
+            raise ValueError(f"当前 pgvector 表要求 384 维，实际 embedding 是 {dimension} 维。")
+        embedding_id = f"{record.id}:{provider_name}:{model_name}:0"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO beginner_agent_memory_embeddings (
+                    id, memory_id, embedding_model, embedding_provider,
+                    embedding_dim, text, embedding, created_at
+                )
+                VALUES (
+                    %(id)s, %(memory_id)s, %(embedding_model)s,
+                    %(embedding_provider)s, %(embedding_dim)s, %(text)s,
+                    %(embedding)s::vector, %(created_at)s::timestamptz
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    embedding_model = EXCLUDED.embedding_model,
+                    embedding_provider = EXCLUDED.embedding_provider,
+                    embedding_dim = EXCLUDED.embedding_dim,
+                    text = EXCLUDED.text,
+                    embedding = EXCLUDED.embedding,
+                    created_at = EXCLUDED.created_at
+                """,
+                {
+                    "id": embedding_id,
+                    "memory_id": record.id,
+                    "embedding_model": model_name,
+                    "embedding_provider": provider_name,
+                    "embedding_dim": dimension,
+                    "text": embedding_text,
+                    "embedding": vector_to_sql(vector),
+                    "created_at": record.created_at,
+                },
+            )
+
+    def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
+        """用 pgvector 查询语义相近的 memory records。"""
+
+        self._ensure_table()
+        vector, provider_name, model_name, dimension = safe_embedding(query_text)
+        if dimension != 384:
+            raise ValueError(f"当前 pgvector 表要求 384 维，实际 query embedding 是 {dimension} 维。")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.id, m.kind, m.task_id, m.title, m.summary, m.status,
+                       m.tool_name, m.tool_result_status, m.paths, m.tags,
+                       m.confidence, m.source, m.created_at::text, m.metadata,
+                       e.embedding <=> %(query_embedding)s::vector AS distance,
+                       e.embedding_provider, e.embedding_model
+                FROM beginner_agent_memory_embeddings e
+                JOIN beginner_agent_memory m ON m.id = e.memory_id
+                WHERE e.embedding_provider = %(provider)s
+                  AND e.embedding_model = %(model)s
+                ORDER BY e.embedding <=> %(query_embedding)s::vector
+                LIMIT %(limit)s
+                """,
+                {
+                    "query_embedding": vector_to_sql(vector),
+                    "provider": provider_name,
+                    "model": model_name,
+                    "limit": limit,
+                },
+            ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            records.append(
+                {
+                    "id": row[0],
+                    "kind": row[1],
+                    "task_id": row[2],
+                    "title": row[3],
+                    "summary": row[4],
+                    "status": row[5],
+                    "tool_name": row[6],
+                    "tool_result_status": row[7],
+                    "paths": row[8],
+                    "tags": row[9],
+                    "confidence": row[10],
+                    "source": row[11],
+                    "created_at": row[12],
+                    "metadata": row[13],
+                    "vector_distance": float(row[14]),
+                    "embedding_provider": row[15],
+                    "embedding_model": row[16],
+                }
+            )
+        return records
 
 
 def memory_record_json_schema() -> dict[str, Any]:
     """导出 MemoryRecord 的 JSON Schema。"""
 
     return MemoryRecord.model_json_schema()
+
+
+def _embedding_text_for_record(record: MemoryRecord) -> str:
+    """构造用于 embedding 的短文本。
+
+    中文注释：
+    不要把完整 tool output 或大文件内容塞进 embedding。
+    memory embedding 应该索引“经验摘要”，而不是索引所有原始数据。
+    """
+
+    return "\n".join(
+        [
+            f"kind: {record.kind}",
+            f"title: {record.title}",
+            f"summary: {record.summary}",
+            f"status: {record.status}",
+            f"tool: {record.tool_name}",
+            f"tool_result_status: {record.tool_result_status}",
+            f"paths: {', '.join(record.paths)}",
+            f"tags: {', '.join(record.tags)}",
+        ]
+    )[:2000]
+
+
+def _query_text_for_state(state: State) -> str:
+    """构造 Memory Retriever 的向量查询文本。"""
+
+    current_task = state["task_tree"].get(state["current_task_id"], {})
+    return "\n".join(
+        [
+            f"user_goal: {state['user_input']}",
+            f"current_task: {current_task.get('title', '')}",
+            f"tool_name: {state.get('tool_name', 'none')}",
+            f"tool_result_status: {state.get('tool_result_status', 'none')}",
+        ]
+    )
 
 
 def _configured_store() -> MemoryStore:
@@ -365,6 +541,16 @@ def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
     except Exception as exc:
         fallback = JsonlMemoryStore()
         return fallback.list_records(MAX_MEMORY_RECORDS), fallback.backend_name, str(exc)
+
+
+def _search_vector_records(query_text: str) -> tuple[list[dict[str, Any]], str, str]:
+    """执行向量检索，并返回 backend 信息。"""
+
+    store = _configured_store()
+    try:
+        return store.search_similar_records(query_text, MAX_RETRIEVED_RECORDS), store.backend_name, ""
+    except Exception as exc:
+        return [], store.backend_name, str(exc)
 
 
 def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str]:
@@ -520,10 +706,44 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
     """检索和当前目标最相关的历史记忆。"""
 
     records, backend, backend_error = _list_memory_records()
+    query_text = _query_text_for_state(state)
+    vector_records, vector_backend, vector_error = _search_vector_records(query_text)
     scored = [(record, _score_record(record, state)) for record in records]
     relevant = [item for item in scored if item[1] > 0]
     relevant.sort(key=lambda item: item[1], reverse=True)
-    return [record for record, _score in relevant[:MAX_RETRIEVED_RECORDS]], backend, backend_error
+    merged: dict[str, dict[str, Any]] = {}
+    for record in vector_records:
+        merged[str(record.get("id", ""))] = {
+            **record,
+            "retrieval_source": "vector",
+            "retrieval_score": 1.0 - float(record.get("vector_distance", 1.0)),
+        }
+    for record, score in relevant:
+        record_id = str(record.get("id", ""))
+        if record_id in merged:
+            merged[record_id]["retrieval_source"] = "hybrid"
+            merged[record_id]["rule_score"] = score
+            merged[record_id]["retrieval_score"] = float(merged[record_id].get("retrieval_score", 0)) + (
+                score / 10
+            )
+        else:
+            merged[record_id] = {
+                **record,
+                "retrieval_source": "rule",
+                "rule_score": score,
+                "retrieval_score": score / 10,
+            }
+    results = sorted(
+        merged.values(),
+        key=lambda record: float(record.get("retrieval_score", 0)),
+        reverse=True,
+    )[:MAX_RETRIEVED_RECORDS]
+    errors = "; ".join(error for error in (backend_error, vector_error) if error)
+    if vector_records:
+        backend = f"{backend}+vector"
+    elif vector_error:
+        backend = f"{backend}; vector_backend={vector_backend}"
+    return results, backend, errors
 
 
 def memory_retriever_node(state: State) -> dict[str, object]:
