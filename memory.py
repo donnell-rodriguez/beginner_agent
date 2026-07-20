@@ -21,6 +21,7 @@ MEMORY_DIR = STATE_DIR / "memory"
 MEMORY_FILE = MEMORY_DIR / "memory.jsonl"
 MAX_MEMORY_RECORDS = 500
 MAX_RETRIEVED_RECORDS = 8
+MAX_INDEXED_VECTOR_DIMENSION = 2000
 
 
 # 中文注释：
@@ -64,10 +65,43 @@ MAX_RETRIEVED_RECORDS = 8
 # 最终运行链路大致是：
 #
 #   MemoryRecord 文本经验
-#      -> EmbeddingProvider 生成 384 维向量
+#      -> EmbeddingProvider 生成固定维度向量
 #      -> Postgres + pgvector 保存向量
 #      -> Memory Retriever 根据当前任务做相似度搜索
 #      -> 找回和当前任务最相关的历史经验
+
+
+def _validate_embedding_dimension(dimension: int) -> None:
+    """校验当前 pgvector 索引使用的向量维度。
+
+    中文注释：
+    Qwen3-Embedding-8B 可以输出很高维度的向量。
+    但是对 Postgres + pgvector 来说，本地工程更推荐使用 1024 维。
+
+    原因：
+    - 1024 维已经足够做 memory / code 检索入门。
+    - 向量更短，写入和查询更快。
+    - pgvector 常规索引更适合 2000 维以内的 vector。
+
+    如果你真的要用 4096 维，后续应该单独设计 halfvec / binary quantization /
+    专用向量数据库，而不是直接塞进当前教学项目的索引表。
+    """
+
+    if dimension <= 0:
+        raise ValueError("embedding 维度必须大于 0。")
+    if dimension > MAX_INDEXED_VECTOR_DIMENSION:
+        raise ValueError(
+            "当前 pgvector 索引表最多支持 "
+            f"{MAX_INDEXED_VECTOR_DIMENSION} 维。"
+            "Qwen3-Embedding-8B 请先设置 BEGINNER_AGENT_EMBEDDING_DIM=1024。"
+        )
+
+
+def _embedding_table_name(dimension: int) -> str:
+    """根据维度生成安全的 embedding 表名。"""
+
+    _validate_embedding_dimension(dimension)
+    return f"beginner_agent_memory_embeddings_{dimension}"
 
 
 class MemoryRecord(BaseModel):
@@ -176,9 +210,9 @@ class PostgresMemoryStore:
        保存普通结构化字段。
        例如 kind、task_id、title、summary、tool_name、status。
 
-    2. beginner_agent_memory_embeddings
+    2. beginner_agent_memory_embeddings_<dimension>
        保存向量字段。
-       例如 embedding vector(384)。
+       例如 beginner_agent_memory_embeddings_1024 保存 vector(1024)。
 
     为什么要两张表？
     因为普通字段适合做精确过滤：
@@ -215,8 +249,9 @@ class PostgresMemoryStore:
         # beginner_agent_memory：
         #   保存结构化记忆。
         #
-        # beginner_agent_memory_embeddings：
+        # beginner_agent_memory_embeddings_<dimension>：
         #   保存 embedding 向量。
+        #   这类表由 _ensure_embedding_table(...) 按需创建。
         #
         # CREATE INDEX：
         #   给常见查询加索引，让检索更快。
@@ -273,39 +308,70 @@ class PostgresMemoryStore:
                 """
             )
             conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS beginner_agent_memory_embeddings (
+                "DROP INDEX IF EXISTS idx_beginner_agent_memory_embeddings_vector"
+            )
+
+    def _ensure_embedding_table(self, dimension: int) -> str:
+        """确保当前 embedding 维度对应的 pgvector 表存在。
+
+        中文注释：
+        pgvector 的 vector 列通常要固定维度，例如 vector(384)、vector(1024)。
+        之前本项目只有 384 维 hash embedding，所以只有一张固定表。
+
+        现在你要接 Qwen3-Embedding-8B。
+        推荐让它输出 1024 维向量，因此这里改成“按维度分表”：
+
+            beginner_agent_memory_embeddings_384
+            beginner_agent_memory_embeddings_1024
+
+        这样做的好处：
+        - 旧的 384 维测试数据不会影响新的 1024 维 Qwen 数据。
+        - 每张表的 pgvector 列维度固定，索引更清楚。
+        - 以后换 1536 / 2000 维，也可以并存。
+
+        注意：
+        pgvector 的常规 vector 索引更适合 2000 维以内。
+        Qwen3-Embedding-8B 原生可以到 4096 维，但本项目建议请求 1024 维。
+        """
+
+        _validate_embedding_dimension(dimension)
+        table_name = _embedding_table_name(dimension)
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
                     id TEXT PRIMARY KEY,
                     memory_id TEXT NOT NULL REFERENCES beginner_agent_memory(id) ON DELETE CASCADE,
                     embedding_model TEXT NOT NULL,
                     embedding_provider TEXT NOT NULL,
                     embedding_dim INTEGER NOT NULL,
                     text TEXT NOT NULL,
-                    embedding VECTOR(384) NOT NULL,
+                    embedding VECTOR({dimension}) NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL
                 )
                 """
             )
             conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_embeddings_memory_id
-                ON beginner_agent_memory_embeddings (memory_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_embeddings_model
-                ON beginner_agent_memory_embeddings (embedding_provider, embedding_model)
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_memory_id
+                ON {table_name} (memory_id)
                 """
             )
             conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_model
+                ON {table_name} (embedding_provider, embedding_model)
                 """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_embeddings_vector
-                ON beginner_agent_memory_embeddings
+            )
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_vector
+                ON {table_name}
                 USING ivfflat (embedding vector_cosine_ops)
                 WITH (lists = 20)
                 """
             )
+        return table_name
 
     def list_records(self, limit: int) -> list[dict[str, Any]]:
         self._ensure_table()
@@ -389,16 +455,12 @@ class PostgresMemoryStore:
 
         embedding_text = _embedding_text_for_record(record)
         vector, provider_name, model_name, dimension = safe_embedding(embedding_text)
-        if dimension != 384:
-            # 中文注释：
-            # 当前 Docker pgvector 表固定 VECTOR(384)。
-            # 如果你换了真实 embedding 模型，需要同步修改表维度和环境变量。
-            raise ValueError(f"当前 pgvector 表要求 384 维，实际 embedding 是 {dimension} 维。")
+        table_name = self._ensure_embedding_table(dimension)
         embedding_id = f"{record.id}:{provider_name}:{model_name}:0"
         with self._connect() as conn:
             conn.execute(
-                """
-                INSERT INTO beginner_agent_memory_embeddings (
+                f"""
+                INSERT INTO {table_name} (
                     id, memory_id, embedding_model, embedding_provider,
                     embedding_dim, text, embedding, created_at
                 )
@@ -432,17 +494,16 @@ class PostgresMemoryStore:
 
         self._ensure_table()
         vector, provider_name, model_name, dimension = safe_embedding(query_text)
-        if dimension != 384:
-            raise ValueError(f"当前 pgvector 表要求 384 维，实际 query embedding 是 {dimension} 维。")
+        table_name = self._ensure_embedding_table(dimension)
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT m.id, m.kind, m.task_id, m.title, m.summary, m.status,
                        m.tool_name, m.tool_result_status, m.paths, m.tags,
                        m.confidence, m.source, m.created_at::text, m.metadata,
                        e.embedding <=> %(query_embedding)s::vector AS distance,
                        e.embedding_provider, e.embedding_model
-                FROM beginner_agent_memory_embeddings e
+                FROM {table_name} e
                 JOIN beginner_agent_memory m ON m.id = e.memory_id
                 WHERE e.embedding_provider = %(provider)s
                   AND e.embedding_model = %(model)s

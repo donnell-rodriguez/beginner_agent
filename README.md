@@ -612,7 +612,7 @@ idx_beginner_agent_memory_tags
 ```text
 docker-compose.yml 使用 pgvector/pgvector:pg16
 memory.py 自动创建 vector extension
-memory.py 自动创建 beginner_agent_memory_embeddings 表
+memory.py 按维度自动创建 beginner_agent_memory_embeddings_<dimension> 表
 embeddings.py 提供 EmbeddingProvider 抽象
 ```
 
@@ -641,13 +641,57 @@ BEGINNER_AGENT_EMBEDDING_PROVIDER=hash
 BEGINNER_AGENT_EMBEDDING_DIM=384
 ```
 
-如果你的 OMLX 后续提供真正的 embedding 模型和 `/v1/embeddings` 接口，可以切换：
+如果你的 OMLX 后续提供真正的 embedding 模型和 `/v1/embeddings` 接口，可以切换到 Qwen3-Embedding-8B：
 
 ```text
 BEGINNER_AGENT_EMBEDDING_PROVIDER=omlx
+BEGINNER_AGENT_EMBEDDING_DIM=1024
 OMLX_BASE_URL=http://127.0.0.1:8000/v1
 OMLX_API_KEY=local-omlx-key
-OMLX_EMBEDDING_MODEL=your-local-embedding-model
+OMLX_EMBEDDING_MODEL=Qwen3-Embedding-8B
+OMLX_EMBEDDING_SEND_DIMENSIONS=true
+```
+
+为什么这里推荐 1024 维，而不是直接使用 4096 维：
+
+```text
+Qwen3-Embedding-8B 的能力很强，可以输出高维向量。
+但是本项目当前使用 Postgres + pgvector 做本地向量库。
+
+对这个阶段来说：
+  - 1024 维已经适合 memory 检索和代码片段检索。
+  - 向量越短，写入、索引、查询越轻。
+  - pgvector 常规 vector 索引更适合 2000 维以内。
+
+所以推荐：
+  Qwen3-Embedding-8B 模型
+  + BEGINNER_AGENT_EMBEDDING_DIM=1024
+
+这样不是浪费 8B 模型，而是让 8B 模型输出更适合本地工程系统使用的向量。
+```
+
+模型下载完成后，先验证 OMLX embedding 接口：
+
+```bash
+BEGINNER_AGENT_EMBEDDING_PROVIDER=omlx \
+BEGINNER_AGENT_EMBEDDING_DIM=1024 \
+OMLX_BASE_URL=http://127.0.0.1:8000/v1 \
+OMLX_API_KEY=local-omlx-key \
+OMLX_EMBEDDING_MODEL=Qwen3-Embedding-8B \
+uv run python scripts/check_omlx_embedding.py
+```
+
+再验证 Postgres + pgvector + Qwen embedding 的完整写入和检索链路：
+
+```bash
+BEGINNER_AGENT_MEMORY_BACKEND=postgres \
+DATABASE_URL=postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent \
+BEGINNER_AGENT_EMBEDDING_PROVIDER=omlx \
+BEGINNER_AGENT_EMBEDDING_DIM=1024 \
+OMLX_BASE_URL=http://127.0.0.1:8000/v1 \
+OMLX_API_KEY=local-omlx-key \
+OMLX_EMBEDDING_MODEL=Qwen3-Embedding-8B \
+uv run python scripts/check_vector_memory.py
 ```
 
 ## 关键 State 字段

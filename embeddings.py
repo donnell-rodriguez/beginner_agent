@@ -9,6 +9,7 @@ from typing import Protocol
 
 
 DEFAULT_EMBEDDING_DIM = 384
+DEFAULT_QWEN3_EMBEDDING_DIM = 1024
 
 
 class EmbeddingProvider(Protocol):
@@ -92,22 +93,28 @@ class OmlxEmbeddingProvider:
         api_key: str,
         model_name: str,
         dimension: int,
+        send_dimensions: bool = True,
         timeout: int = 30,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_name = model_name
         self.dimension = dimension
+        self.send_dimensions = send_dimensions
         self.timeout = timeout
 
     def embed_text(self, text: str) -> list[float]:
-        body = json.dumps(
-            {
-                "model": self.model_name,
-                "input": text,
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
+        payload: dict[str, object] = {
+            "model": self.model_name,
+            "input": text,
+        }
+        if self.send_dimensions:
+            # 中文注释：
+            # Qwen3 Embedding 支持 MRL，也就是可以指定较低输出维度。
+            # 对本项目来说，1024 维已经适合 memory/code 检索，
+            # 同时比 4096 维更容易被 pgvector 索引和管理。
+            payload["dimensions"] = self.dimension
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/embeddings",
             data=body,
@@ -140,15 +147,22 @@ class OmlxEmbeddingProvider:
 def configured_embedding_provider() -> EmbeddingProvider:
     """根据环境变量选择 embedding provider。"""
 
-    dimension = int(os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM)))
     provider = os.getenv("BEGINNER_AGENT_EMBEDDING_PROVIDER", "hash").strip().lower()
     if provider == "omlx":
+        dimension = int(
+            os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", str(DEFAULT_QWEN3_EMBEDDING_DIM))
+        )
         return OmlxEmbeddingProvider(
             base_url=os.getenv("OMLX_BASE_URL", "http://127.0.0.1:8000/v1"),
             api_key=os.getenv("OMLX_API_KEY", "local-omlx-key"),
-            model_name=os.getenv("OMLX_EMBEDDING_MODEL", "text-embedding-model"),
+            model_name=os.getenv("OMLX_EMBEDDING_MODEL", "Qwen3-Embedding-8B"),
             dimension=dimension,
+            send_dimensions=os.getenv(
+                "OMLX_EMBEDDING_SEND_DIMENSIONS", "true"
+            ).strip().lower()
+            not in {"0", "false", "no"},
         )
+    dimension = int(os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM)))
     return HashEmbeddingProvider(dimension=dimension)
 
 
@@ -163,7 +177,11 @@ def safe_embedding(text: str) -> tuple[list[float], str, str, int]:
     try:
         return provider.embed_text(text), provider.provider_name, provider.model_name, provider.dimension
     except Exception:
-        fallback = HashEmbeddingProvider()
+        # 中文注释：
+        # 如果 OMLX 模型还没下载完或服务暂时不可用，
+        # 这里回退到同维度 hash embedding。
+        # 这样数据库表维度仍然一致，memory 链路不会被模型下载状态卡死。
+        fallback = HashEmbeddingProvider(dimension=provider.dimension)
         return fallback.embed_text(text), fallback.provider_name, fallback.model_name, fallback.dimension
 
 

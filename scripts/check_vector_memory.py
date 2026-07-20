@@ -35,7 +35,10 @@ def main() -> None:
         paths=["memory.py", "embeddings.py"],
         tags=["postgres", "pgvector", "memory", "embedding"],
         confidence=0.99,
-        metadata={"embedding_provider": "hash"},
+        metadata={
+            "requested_embedding_provider": os.getenv("BEGINNER_AGENT_EMBEDDING_PROVIDER", "hash"),
+            "requested_embedding_dim": os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", "384"),
+        },
     )
     store.upsert_record(record)
     matches = store.search_similar_records("memory.py pgvector embedding retrieval", 5)
@@ -46,7 +49,9 @@ def main() -> None:
     print(
         "backend=postgres+pgvector "
         f"records_checked={len(matches)} matched_id={matched[0]['id']} "
-        f"distance={matched[0].get('vector_distance')}"
+        f"distance={matched[0].get('vector_distance')} "
+        f"actual_provider={matched[0].get('embedding_provider')} "
+        f"actual_model={matched[0].get('embedding_model')}"
     )
 
 
