@@ -70,6 +70,7 @@ from .patch_tools import (
     format_apply_tool,
     patch_plan_tool,
     preview_patch_tool,
+    read_patch_plan_metadata,
     revert_file_patch_tool,
     rollback_tool,
     validate_patch_plan_tool,
@@ -805,7 +806,7 @@ def _build_tool_specs() -> dict[str, ToolSpec]:
         _spec("apply_patch", access="write", category="edit", risk="high", handler=lambda args: apply_patch_tool(_string_arg(args, "path"), _string_arg(args, "old_text"), _string_arg(args, "new_text"))),
         _spec("rollback", access="write", category="edit", risk="high", handler=lambda args: rollback_tool(_string_arg(args, "path"), _string_arg(args, "content"))),
         _spec("format_apply", access="write", category="edit", risk="medium", handler=lambda args: format_apply_tool(_string_arg(args, "path"))),
-        _spec("patch_plan", access="write", category="edit", risk="medium", handler=lambda args: patch_plan_tool(_string_arg(args, "path"), _string_arg(args, "goal"), _string_arg(args, "old_text"), _string_arg(args, "new_text"))),
+        _spec("patch_plan", category="edit", risk="medium", handler=lambda args: patch_plan_tool(_string_arg(args, "path"), _string_arg(args, "goal"), _string_arg(args, "old_text"), _string_arg(args, "new_text"))),
         _spec("apply_patch_plan", access="write", category="edit", risk="high", handler=lambda args: apply_patch_plan_tool(_string_arg(args, "patch_plan_id"))),
         _spec("revert_file_patch", access="write", category="edit", risk="high", handler=lambda args: revert_file_patch_tool(_string_arg(args, "path"), _string_arg(args, "content"))),
         _spec("checkpoint_save", access="write", category="memory", risk="medium", handler=lambda args: checkpoint_save_tool(_string_arg(args, "name"), args.get("data", ""))),
@@ -1011,9 +1012,18 @@ def _changed_files_from_tool(tool_name: str, normalized_args: dict[str, Any]) ->
     真正生产级可以让每个写工具明确返回 changed_files。
     """
 
+    if tool_name == "apply_patch_plan":
+        patch_plan_id = str(normalized_args.get("patch_plan_id", ""))
+        if not patch_plan_id:
+            return []
+        try:
+            path = str(read_patch_plan_metadata(patch_plan_id).get("path", ""))
+        except ValueError:
+            return []
+        return [path] if path else []
+
     if tool_name not in {
         "apply_patch",
-        "apply_patch_plan",
         "format_apply",
         "rollback",
         "revert_file_patch",

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from difflib import unified_diff
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
 from .state import State
-from .tools import read_text_for_snapshot, run_tool_model
+from .tooling.patch_tools import read_patch_plan_metadata
+from .tooling.results import ToolResult, ToolValidation, tool_result_json_schema
+from .tools import WRITE_TOOLS, read_text_for_snapshot, run_tool_model
 
 
 LONG_RUNNING_TOOLS = {
@@ -27,6 +31,7 @@ LONG_RUNNING_TOOLS = {
     "run_typecheck",
     "static_check",
 }
+WRITE_TOOL_SET = set(WRITE_TOOLS)
 
 
 def _utc_now() -> str:
@@ -62,6 +67,116 @@ def _is_long_running_tool(tool_name: str) -> bool:
     """判断工具是否属于可能耗时较长的一类。"""
 
     return tool_name in LONG_RUNNING_TOOLS
+
+
+def _text_hash(text: str) -> str:
+    """计算文本 hash，用于记录修改前后是否一致。"""
+
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def _diff_text(path: str, before: str, after: str) -> str:
+    """生成单文件 unified diff，方便审计和 Evaluator 检查。"""
+
+    diff = unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+        lineterm="",
+    )
+    return "\n".join(diff)
+
+
+def _changed_line_count(diff: str) -> int:
+    """粗略统计 diff 中真实增删行数，不统计 diff 头部。"""
+
+    count = 0
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith(("+", "-")):
+            count += 1
+    return count
+
+
+def _target_path_for_write_tool(tool_name: str, tool_args: dict[str, Any]) -> str:
+    """推断写工具最终会修改哪个文件。"""
+
+    if tool_name == "apply_patch_plan":
+        patch_plan_id = str(tool_args.get("patch_plan_id", ""))
+        return str(read_patch_plan_metadata(patch_plan_id).get("path", ""))
+    return str(tool_args.get("path", ""))
+
+
+def _preflight_write_tool(state: State, tool_name: str, tool_args: dict[str, Any]) -> str:
+    """Executor 最后一层写工具保护。
+
+    中文注释：
+    Policy 是第一道权限层，但生产级系统还会在真正执行前再检查一次。
+    这叫 defense in depth。
+
+    这里主要防几类错误修改：
+    - 写工具绕过审批。
+    - 直接 apply_patch 绕过 PatchPlan 治理流程。
+    - apply_patch_plan 引用未验证或已过期的 PatchPlan。
+    - rollback 没有 patch_history。
+    """
+
+    if tool_name not in WRITE_TOOL_SET:
+        return ""
+    task = dict(state["task_tree"].get(state["current_task_id"], {}))
+    if state["policy_decision"] != "allow":
+        return "Executor preflight 拒绝：写工具必须先通过 Tool Policy / Human Approval。"
+
+    if tool_name == "apply_patch" and not task.get("allow_direct_patch", False):
+        return (
+            "Executor preflight 拒绝：普通流程禁止直接 apply_patch，"
+            "请使用 patch_plan -> validate_patch_plan -> apply_patch_plan。"
+        )
+
+    if tool_name == "apply_patch_plan":
+        patch_plan_id = str(tool_args.get("patch_plan_id", ""))
+        try:
+            metadata = read_patch_plan_metadata(patch_plan_id)
+            target_path = str(metadata.get("path", ""))
+            validated_hash = str(metadata.get("validated_file_hash", ""))
+            current = read_text_for_snapshot(target_path)
+        except ValueError as exc:
+            return f"Executor preflight 拒绝：{exc}"
+        if not metadata.get("validated"):
+            return "Executor preflight 拒绝：PatchPlan 尚未通过 validate_patch_plan。"
+        if not validated_hash or _text_hash(current) != validated_hash:
+            return "Executor preflight 拒绝：目标文件在 PatchPlan 验证后发生变化。"
+
+    if tool_name == "rollback" and not state["patch_history"]:
+        return "Executor preflight 拒绝：rollback 需要 patch_history。"
+    return ""
+
+
+def _blocked_tool_result(
+    *,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    reason: str,
+    started_at: str,
+) -> ToolResult:
+    """构造一个未真正执行工具的 blocked ToolResult。"""
+
+    return ToolResult(
+        status="blocked",
+        tool_name=tool_name,
+        tool_args=tool_args,
+        normalized_args=tool_args,
+        output=reason,
+        validation=ToolValidation(ok=False, reason=reason),
+        metadata={"executor_preflight": True},
+        diagnostics={"tool_result_schema": tool_result_json_schema()},
+        started_at=started_at,
+        duration_ms=0,
+        error_type="executor_preflight",
+        retryable=False,
+    )
 
 
 def _build_execution_attempt(
@@ -155,19 +270,34 @@ def executor_node(state: State) -> dict[str, Any]:
             "content": last_patch.get("before_content", ""),
         }
 
+    preflight_error = _preflight_write_tool(state, tool_name, tool_args)
+    write_target_path = ""
+    if tool_name in WRITE_TOOL_SET and not preflight_error:
+        try:
+            write_target_path = _target_path_for_write_tool(tool_name, tool_args)
+        except ValueError as exc:
+            preflight_error = f"Executor preflight 拒绝：{exc}"
+
     # 中文注释：
     # 写入工具执行前先拍快照。
-    # 这样 apply_patch 成功后可以记录 patch_history，后续 rollback 能恢复。
-    if tool_name == "apply_patch":
-        path = str(tool_args.get("path", ""))
+    # 这样写成功后可以记录 patch_history，后续 rollback 能恢复。
+    if tool_name in {"apply_patch", "apply_patch_plan", "format_apply"} and write_target_path:
         try:
-            before_content = read_text_for_snapshot(path)
+            before_content = read_text_for_snapshot(write_target_path)
         except ValueError:
             before_content = ""
     else:
         before_content = ""
 
-    tool_result_model = run_tool_model(tool_name, tool_args)
+    if preflight_error:
+        tool_result_model = _blocked_tool_result(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            reason=preflight_error,
+            started_at=started_at,
+        )
+    else:
+        tool_result_model = run_tool_model(tool_name, tool_args)
     finished_at = _utc_now()
     tool_result_data = tool_result_model.model_dump(mode="json")
     tool_result = tool_result_model.output
@@ -191,20 +321,26 @@ def executor_node(state: State) -> dict[str, Any]:
         tool_result_data=tool_result_data,
     )
     task["status"] = "executed" if result_status != "blocked" else "failed"
-    if tool_name == "apply_patch" and result_status == "success":
-        path = str(tool_args.get("path", ""))
+    if tool_name in {"apply_patch", "apply_patch_plan", "format_apply"} and result_status == "success":
+        path = write_target_path or str(tool_args.get("path", ""))
         after_content = ""
         if path:
             try:
                 after_content = read_text_for_snapshot(path)
             except ValueError:
                 after_content = ""
+        diff = _diff_text(path, before_content, after_content)
         patch_record = {
             "task_id": task_id,
             "tool_name": tool_name,
             "path": path,
             "before_content": before_content,
             "after_content": after_content,
+            "before_hash": _text_hash(before_content),
+            "after_hash": _text_hash(after_content),
+            "diff": diff,
+            "changed_line_count": _changed_line_count(diff),
+            "patch_plan_id": str(tool_args.get("patch_plan_id", "")),
             "result": tool_result,
         }
 
@@ -235,11 +371,11 @@ def executor_node(state: State) -> dict[str, Any]:
             f"可重试：{tool_result_model.retryable}\n"
             f"工具结果：\n{tool_result}"
         ),
-        "next_action": "evaluate",
+        "next_action": "monitor",
         "messages": [
             {
                 "role": "assistant",
-                "content": f"Executor：完成任务 {task_id}，进入 Evaluator。",
+                "content": f"Executor：完成任务 {task_id}，进入 Execution Monitor。",
             }
         ],
     }

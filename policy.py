@@ -277,13 +277,20 @@ def rule_direct_patch_requires_plan(context: PolicyContext, decision: PolicyDeci
 
         patch_plan -> validate_patch_plan -> preview/dry_run -> apply_patch_plan
 
-    直接 apply_patch 不是绝对禁止，但没有人工审批时必须停下来。
+    现在普通流程直接 apply_patch 会被拒绝。
+    只有任务显式设置 allow_direct_patch=True 时，才允许走人工审批后的直接 patch。
     """
 
     if context.tool_name != "apply_patch" or decision.action == "deny":
         return
-    if not context.human_approved:
-        decision.apply("ask", "direct_patch_requires_plan", "直接 apply_patch 需要人工审批；优先使用 patch_plan / validate_patch_plan / apply_patch_plan。")
+    if not context.task.get("allow_direct_patch", False):
+        decision.apply(
+            "deny",
+            "direct_patch_requires_plan",
+            "普通流程禁止直接 apply_patch；必须使用 patch_plan / validate_patch_plan / apply_patch_plan。",
+        )
+    elif not context.human_approved:
+        decision.apply("ask", "direct_patch_requires_plan", "直接 apply_patch 需要人工审批。")
 
 
 def rule_rollback_requires_history(context: PolicyContext, decision: PolicyDecision) -> None:

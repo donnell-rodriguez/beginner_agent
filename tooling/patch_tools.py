@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 from difflib import unified_diff
+from hashlib import sha256
 from typing import Any
 
 from .core import (
@@ -92,13 +94,51 @@ def _patch_plan_path(plan_id: str):
     return PATCH_PLAN_DIR / f"{safe_id}.json"
 
 
+def _file_hash_text(text: str) -> str:
+    """计算文本内容 hash，用来判断文件是否在验证后被别人改过。"""
+
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def _read_patch_plan(patch_plan_id: str) -> dict[str, Any]:
+    """读取 PatchPlan JSON。"""
+
+    plan_path = _patch_plan_path(patch_plan_id)
+    if not plan_path.exists():
+        raise ValueError(f"PatchPlan 不存在：{patch_plan_id}")
+    data = json.loads(plan_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"PatchPlan 格式不正确：{patch_plan_id}")
+    return data
+
+
+def read_patch_plan_metadata(patch_plan_id: str) -> dict[str, Any]:
+    """给 Executor / Registry 读取 PatchPlan 关键信息。
+
+    中文注释：
+    这不是一个对 LLM 暴露的工具，而是内部辅助函数。
+    Executor 需要知道 apply_patch_plan 最终会改哪个 path，
+    才能提前拍快照、记录 diff、写入 patch_history。
+    """
+
+    plan = _read_patch_plan(patch_plan_id)
+    return {
+        "id": str(plan.get("id", patch_plan_id)),
+        "path": str(plan.get("path", "")),
+        "goal": str(plan.get("goal", "")),
+        "validated": bool(plan.get("validated", False)),
+        "validated_file_hash": str(plan.get("validated_file_hash", "")),
+    }
+
+
 def patch_plan_tool(path: str, goal: str, old_text: str = "", new_text: str = "") -> str:
     """生成并保存 PatchPlan。"""
 
     # 中文注释：
     # PatchPlan 是“先计划修改，再验证，再审批，再执行”的基础。
     # 比直接 apply_patch 更接近真实 code agent 的做法。
-    safe_text_file(path)
+    file_path = safe_text_file(path)
+    current = file_path.read_text(encoding="utf-8", errors="replace")
     plan_id = f"patch-{uuid.uuid4().hex[:8]}"
     plan = {
         "id": plan_id,
@@ -107,6 +147,12 @@ def patch_plan_tool(path: str, goal: str, old_text: str = "", new_text: str = ""
         "old_text": old_text,
         "new_text": new_text,
         "risk_level": "medium" if old_text and new_text else "draft",
+        "created_file_hash": _file_hash_text(current),
+        "validated": False,
+        "validated_at": "",
+        "validated_file_hash": "",
+        "validation_issues": [],
+        "preview": "",
     }
     _patch_plan_path(plan_id).write_text(json_dumps(plan), encoding="utf-8")
     return json_dumps(plan)
@@ -121,7 +167,7 @@ def validate_patch_plan_tool(patch_plan_id: str) -> str:
     plan_path = _patch_plan_path(patch_plan_id)
     if not plan_path.exists():
         return f"PatchPlan 不存在：{patch_plan_id}"
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan = _read_patch_plan(patch_plan_id)
     path = str(plan.get("path", ""))
     old_text = str(plan.get("old_text", ""))
     new_text = str(plan.get("new_text", ""))
@@ -136,7 +182,28 @@ def validate_patch_plan_tool(patch_plan_id: str) -> str:
         issues.append("old_text 在目标文件中不是恰好出现一次。")
     if len(old_text) + len(new_text) > MAX_PATCH_CHARS:
         issues.append("patch 内容过大。")
-    return json_dumps({"patch_plan_id": patch_plan_id, "valid": not issues, "issues": issues})
+    preview = ""
+    if not issues:
+        preview = preview_patch_tool(path, old_text, new_text)
+    plan.update(
+        {
+            "validated": not issues,
+            "validated_at": datetime.now(timezone.utc).isoformat() if not issues else "",
+            "validated_file_hash": _file_hash_text(current) if not issues else "",
+            "validation_issues": issues,
+            "preview": preview,
+        }
+    )
+    plan_path.write_text(json_dumps(plan), encoding="utf-8")
+    return json_dumps(
+        {
+            "patch_plan_id": patch_plan_id,
+            "valid": not issues,
+            "issues": issues,
+            "validated_file_hash": plan["validated_file_hash"],
+            "preview": preview,
+        }
+    )
 
 
 def preview_patch_tool(path: str, old_text: str, new_text: str) -> str:
@@ -217,12 +284,22 @@ def apply_patch_plan_tool(patch_plan_id: str) -> str:
     """应用已经验证的 PatchPlan。"""
 
     # 中文注释：
-    # 先 validate，再 apply。
-    # 如果 PatchPlan 不安全，不会执行修改。
+    # 大厂式修改治理要求：
+    #   计划必须先 validate，并把 validated 状态写回 PatchPlan。
+    #   执行时再次确认当前文件 hash 没变，避免验证后文件被别人改过。
+    plan = _read_patch_plan(patch_plan_id)
+    if not plan.get("validated"):
+        return "apply_patch_plan 失败：PatchPlan 尚未通过 validate_patch_plan。"
+    path = str(plan.get("path", ""))
+    file_path = safe_text_file(path)
+    current = file_path.read_text(encoding="utf-8", errors="replace")
+    validated_hash = str(plan.get("validated_file_hash", ""))
+    if not validated_hash or _file_hash_text(current) != validated_hash:
+        return "apply_patch_plan 失败：目标文件在验证后发生变化，请重新 validate_patch_plan。"
     validation = json.loads(validate_patch_plan_tool(patch_plan_id))
     if not validation.get("valid"):
         return "apply_patch_plan 失败：\n" + json_dumps(validation)
-    plan = json.loads(_patch_plan_path(patch_plan_id).read_text(encoding="utf-8"))
+    plan = _read_patch_plan(patch_plan_id)
     return apply_patch_tool(str(plan["path"]), str(plan["old_text"]), str(plan["new_text"]))
 
 

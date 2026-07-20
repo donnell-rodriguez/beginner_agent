@@ -10,6 +10,7 @@ from .state import State
 
 EvaluatorRoute = Literal["commit"]
 TaskCommitterRoute = Literal["memory", "finish"]
+SOURCE_WRITE_TOOLS = {"apply_patch", "apply_patch_plan", "format_apply"}
 
 
 def _fallback_evaluation(task: dict[str, Any], state: State) -> tuple[str, str]:
@@ -145,6 +146,79 @@ def _make_rollback_task(state: State, task: dict[str, Any]) -> dict[str, Any] | 
         args={"path": path, "content": before_content},
         reason="测试或 lint 失败，安排回滚恢复。",
     )
+
+
+def _changed_files_for_task(task: dict[str, Any], state: State) -> list[str]:
+    """从 ToolResult / patch_history 中提取本次写操作影响的文件。"""
+
+    tool_result_data = task.get("tool_result_data") or state.get("tool_result_data", {})
+    changed_files = []
+    if isinstance(tool_result_data, dict):
+        raw = tool_result_data.get("changed_files", [])
+        if isinstance(raw, list):
+            changed_files.extend(str(path) for path in raw if str(path))
+    if not changed_files and state["patch_history"]:
+        last_patch = state["patch_history"][-1]
+        path = str(last_patch.get("path", ""))
+        if path:
+            changed_files.append(path)
+    return sorted(set(changed_files))
+
+
+def _verification_tasks_for_write(
+    task: dict[str, Any], state: State, changed_files: list[str]
+) -> list[dict[str, Any]]:
+    """写操作成功后自动生成验证任务。
+
+    中文注释：
+    大厂式 code agent 不应该“改完就算完成”。
+    写操作成功后，至少要安排几类验证：
+
+    - git_diff_file：确认实际 diff。
+    - secret_scan：确认没有引入明显密钥。
+    - static_check：确认 Python 代码基本能编译。
+    - run_targeted_tests：跑受控测试入口。
+
+    这些任务仍然会经过 Scheduler / Policy / Executor / Evaluator，
+    所以不会绕过现有安全链路。
+    """
+
+    if not changed_files:
+        return []
+    if task.get("verification_scheduled"):
+        return []
+    if len(state["task_tree"]) >= state["max_total_tasks"]:
+        return []
+
+    parent_id = str(task.get("id", state["current_task_id"]))
+    depth = int(task.get("depth", 0)) + 1
+    first_file = changed_files[0]
+    specs = [
+        ("diff", "检查本次修改 diff 是否只包含预期内容", "git_diff_file", {"path": first_file}),
+        ("secret", "扫描本次修改是否引入明显密钥", "secret_scan", {"path": first_file}),
+        ("static", "运行静态检查确认代码可解析", "static_check", {}),
+        (
+            "tests",
+            "运行受控测试确认修改没有破坏主流程",
+            "run_targeted_tests",
+            {"target": "beginner_agent"},
+        ),
+    ]
+    available_slots = max(0, state["max_total_tasks"] - len(state["task_tree"]))
+    tasks: list[dict[str, Any]] = []
+    for suffix, title, tool, args in specs[:available_slots]:
+        tasks.append(
+            new_task(
+                f"{parent_id}.verify.{suffix}",
+                title,
+                parent_id=parent_id,
+                depth=depth,
+                tool=tool,
+                args=args,
+                reason="写操作完成后自动安排验证，避免错误修改被误判为完成。",
+            )
+        )
+    return tasks
 
 
 def _llm_evaluate(task: dict[str, Any], state: State) -> tuple[str, str]:
@@ -333,10 +407,29 @@ def task_committer_node(state: State) -> dict[str, Any]:
     final_status = "done" if decision == "complete" else "failed"
     task["status"] = final_status
     task["tool_result_status"] = task.get("tool_result_status") or state["tool_result_status"]
+    verification_tasks: list[dict[str, Any]] = []
+    if (
+        final_status == "done"
+        and task.get("tool") in SOURCE_WRITE_TOOLS
+        and task.get("tool_result_status") == "success"
+    ):
+        changed_files = _changed_files_for_task(task, state)
+        verification_tasks = _verification_tasks_for_write(task, state, changed_files)
+        if verification_tasks:
+            task["verification_scheduled"] = True
+            task["verification_task_ids"] = [item["id"] for item in verification_tasks]
+    if verification_tasks:
+        final_status = "pending_verification"
+        task["status"] = final_status
+        task["children"] = [item["id"] for item in verification_tasks]
     task_tree[task_id] = task
+    if verification_tasks:
+        for verification_task in verification_tasks:
+            task_tree[verification_task["id"]] = verification_task
+        agenda = [item["id"] for item in verification_tasks] + agenda
     parent_evaluation = _evaluate_parent_task(task, task_tree)
     goal_progress = goal_progress_snapshot(state, task_tree)
-    completed_record = {**task, "status": final_status}
+    completed_records = [] if verification_tasks else [{**task, "status": final_status}]
     memory_note = {
         "task_id": task_id,
         "title": task.get("title", ""),
@@ -355,10 +448,11 @@ def task_committer_node(state: State) -> dict[str, Any]:
     }
     return {
         "task_tree": task_tree,
+        "agenda": agenda,
         "current_task_id": "",
         "tool_name": "none",
         "tool_args": {},
-        "completed_tasks": [completed_record],
+        "completed_tasks": completed_records,
         "pending_memory": memory_note,
         "evaluation_decision": decision,
         "evaluation_reason": reason,
