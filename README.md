@@ -417,7 +417,123 @@ graph.py -> MemorySaver()
 main.py  -> config={"configurable": {"thread_id": "..."}}
 ```
 
-项目里有两种记忆：
+为什么需要 Memory 节点：
+
+```text
+对小白来说，可以先把 State、Checkpoint、Memory 分成三层理解：
+
+1. State
+   当前这一次图运行里的工作表。
+   节点读取 State，返回局部更新，LangGraph 自动合并。
+   它适合保存“本轮正在发生什么”。
+
+2. Checkpoint
+   当前这一次运行过程的快照。
+   它解决的是“运行到一半能不能恢复”的问题。
+   例如长任务中断后，可以从上次状态继续。
+
+3. Memory
+   跨多次任务复用的经验库。
+   它解决的是“下次遇到类似问题，agent 能不能想起过去经验”的问题。
+```
+
+为什么不能只靠 prompt 或 State：
+
+```text
+1. LLM 上下文有限
+   不能把所有历史任务、所有文件、所有失败记录都塞进 prompt。
+
+2. 长任务会产生很多中间结果
+   如果全部放在 State 里，State 会越来越大，后面的节点越来越难读。
+
+3. Code agent 最有价值的是失败经验
+   例如：
+     这个测试以前失败过，原因是什么？
+     这个文件以前修改过，风险在哪里？
+     这个工具以前执行失败，是权限问题还是参数问题？
+
+   这些经验不应该随着一次 graph.invoke(...) 结束就消失。
+
+4. 真实工程需要可查询、可审计
+   大厂 agent 不只是“会回答”，还要能追踪：
+     它记住了什么？
+     它为什么选择这个任务？
+     它为什么避开某个工具？
+     哪次失败影响了这次决策？
+```
+
+为什么拆成 Memory Retriever 和 Memory Writer：
+
+```text
+Memory Retriever = 做事前读取记忆
+
+它通常放在复杂任务开始前。
+作用是把和当前任务相关的历史经验读出来，放进 memory_context。
+后面的 Planner、Scheduler、Evaluator 可以参考这些记忆。
+
+Memory Writer = 做事后写入记忆
+
+它通常放在任务执行、评估、提交之后。
+作用是把这次任务产生的新经验写成 MemoryRecord。
+例如工具执行失败、测试结果、重要文件、风险提醒、修复经验。
+
+为什么要分开？
+
+因为“读历史经验”和“沉淀新经验”是两个不同职责：
+  - Retriever 影响下一步怎么做。
+  - Writer 负责把这次做事的结果保存下来。
+
+分开以后，图结构更清楚，也更容易替换实现。
+例如以后 Retriever 可以升级成向量检索，Writer 可以升级成审计写入。
+```
+
+为什么使用结构化 MemoryRecord：
+
+```text
+MemoryRecord 不是随便存一段文本，而是把记忆拆成字段：
+
+kind        记忆类型，例如 task_result / tool_failure / note
+task_id     哪个任务产生的记忆
+title       记忆标题
+summary     记忆摘要
+tool_name   相关工具
+status      success / failed / blocked / partial
+paths       相关文件路径
+tags        标签
+confidence 可信度
+metadata    额外结构化信息
+
+这样做的好处是：
+  - 可以按 task_id 查
+  - 可以按 tool_name 查
+  - 可以按 status 查失败经验
+  - 可以按 paths 查某个文件的历史记录
+  - 可以导出 JSON Schema 给前端、数据库、审计系统使用
+```
+
+为什么使用 Postgres + pgvector：
+
+```text
+Postgres 负责持久化：
+  - agent 重启后记忆还在
+  - 可以做索引
+  - 可以做审计查询
+  - 可以和真实业务数据库集成
+
+pgvector 负责语义相似检索：
+  - 当前任务和哪条历史经验语义相似？
+  - 当前报错和过去哪次失败相似？
+  - 当前文件和哪些历史修改相关？
+
+本项目现在采用 hybrid retrieval：
+  - 结构化字段检索：更稳定，适合查精确条件。
+  - 向量相似检索：更灵活，适合找语义相近经验。
+
+一句话：
+Memory 节点让 agent 从“每次重新开始”升级为“会积累经验的工程系统”。
+```
+
+项目里当前包含这些记忆相关组件：
 
 ```text
 1. LangGraph checkpoint

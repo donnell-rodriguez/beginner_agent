@@ -23,6 +23,53 @@ MAX_MEMORY_RECORDS = 500
 MAX_RETRIEVED_RECORDS = 8
 
 
+# 中文注释：
+# 先把这几个概念分清楚，否则很容易混在一起：
+#
+# 1. MemoryRecord
+#    这是“记忆本体”，也就是 agent 真的想保存的经验。
+#    例如：
+#      - 哪个任务完成了
+#      - 哪个工具执行失败了
+#      - 哪个文件和这次任务有关
+#      - 这次失败原因是什么
+#
+# 2. Postgres
+#    这是数据库，负责把 MemoryRecord 长期保存下来。
+#    没有 Postgres 的时候，本项目会退回到 JSONL 文件。
+#
+# 3. pgvector
+#    这是 Postgres 的向量扩展。
+#    它让 Postgres 不仅能存普通字段，还能存 embedding 向量，
+#    并且可以做“相似度搜索”。
+#
+# 4. EmbeddingProvider
+#    这是“把文本变成向量”的组件。
+#    向量数据库本身不会理解文本，需要 embedding 模型先把文本转成数字向量。
+#
+# 5. HashEmbeddingProvider
+#    这是本项目默认的测试 embedding。
+#    它不是智能语义模型，但能稳定生成 384 维向量，
+#    用来验证 pgvector 的写入和查询链路。
+#
+# 6. OmlxEmbeddingProvider
+#    如果你的本地 OMLX 后续提供真正的 /v1/embeddings 接口，
+#    并且加载的是 embedding 模型，就可以切换到它。
+#
+# 重要：
+#   Qwen3-ASR-1.7B-bf16 是语音识别模型，不是向量数据库，也不是 embedding 模型。
+#   当前本地向量数据库是 Postgres + pgvector。
+#   当前默认向量生成器是 HashEmbeddingProvider。
+#
+# 最终运行链路大致是：
+#
+#   MemoryRecord 文本经验
+#      -> EmbeddingProvider 生成 384 维向量
+#      -> Postgres + pgvector 保存向量
+#      -> Memory Retriever 根据当前任务做相似度搜索
+#      -> 找回和当前任务最相关的历史经验
+
+
 class MemoryRecord(BaseModel):
     """结构化记忆记录。
 
@@ -120,6 +167,32 @@ class PostgresMemoryStore:
 
     这里使用延迟 import psycopg。
     如果你的环境没有安装 psycopg，默认 JSONL 路径不受影响。
+
+    小白理解：
+    这个类负责把 agent 的记忆写进 Postgres。
+    它会维护两张表：
+
+    1. beginner_agent_memory
+       保存普通结构化字段。
+       例如 kind、task_id、title、summary、tool_name、status。
+
+    2. beginner_agent_memory_embeddings
+       保存向量字段。
+       例如 embedding vector(384)。
+
+    为什么要两张表？
+    因为普通字段适合做精确过滤：
+
+        找 failure 类型
+        找 read_file 工具
+        找 memory.py 相关记录
+
+    向量字段适合做语义相似搜索：
+
+        当前任务和过去哪个经验意思相近？
+        这次报错和历史哪次失败相似？
+
+    真实 agent 通常会把两者结合起来，也就是 hybrid retrieval。
     """
 
     backend_name = "postgres"
@@ -133,6 +206,20 @@ class PostgresMemoryStore:
         return psycopg.connect(self.database_url)
 
     def _ensure_table(self) -> None:
+        # 中文注释：
+        # 这里会自动初始化数据库结构。
+        #
+        # CREATE EXTENSION vector：
+        #   开启 pgvector 扩展，让 Postgres 支持 vector 类型。
+        #
+        # beginner_agent_memory：
+        #   保存结构化记忆。
+        #
+        # beginner_agent_memory_embeddings：
+        #   保存 embedding 向量。
+        #
+        # CREATE INDEX：
+        #   给常见查询加索引，让检索更快。
         with self._connect() as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             conn.execute(
