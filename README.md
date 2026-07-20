@@ -355,6 +355,104 @@ sync / long_running_sync
 async_job + job_id + polling + cancel + resume
 ```
 
+### 5B. Execution Monitor / Watchdog
+
+位置：
+
+```text
+execution_monitor.py -> execution_monitor_node(...)
+```
+
+职责：
+
+```text
+Executor 执行完后，不直接进入 Evaluator。
+先由 Watchdog 检查这次执行过程是否正常。
+
+它会观察：
+  - 是否 blocked
+  - 是否 failed
+  - 是否 empty
+  - 是否 partial
+  - 是否 completed_over_budget
+
+如果一切正常：
+  进入 Evaluator。
+
+如果执行不理想：
+  进入 Recovery Planner。
+```
+
+为什么要这样设计：
+
+```text
+长任务不能只靠“等它跑完”。
+
+大厂式 agent 通常会把“执行”和“监控”拆开：
+
+Executor 负责做事。
+Watchdog 负责观察做事过程是否健康。
+
+这样以后可以升级成：
+  - 查询后台 job 状态
+  - 轮询 worker
+  - 判断是否卡住
+  - 取消超时任务
+  - 把部分结果保存下来
+```
+
+### 5C. Recovery Planner
+
+位置：
+
+```text
+recovery.py -> recovery_planner_node(...)
+```
+
+职责：
+
+```text
+当 Watchdog 发现执行失败、超预算、空结果、部分结果时，
+Recovery Planner 决定下一步恢复动作。
+
+当前支持：
+
+retry_same            同样方式重试
+retry_with_new_args   调整参数后重试
+use_alternative_tool  换工具
+replan                重新规划
+decompose_more        继续拆小任务
+ask_human             请求人工确认
+stop_with_summary     停止并如实总结
+```
+
+这里的关键思想：
+
+```text
+不是每次失败都问 LLM。
+
+简单明确的问题先用本地规则：
+  - blocked -> ask_human
+  - failed/empty 且有重试额度 -> retry
+  - over_budget -> decompose_more 或 stop_with_summary
+  - partial -> stop_with_summary
+
+复杂或连续失败时，再请求 LLM 给恢复建议。
+
+LLM 只能从固定 action 里选择，不能直接绕过 Tool Policy。
+```
+
+这正是你提到的长任务处理方式：
+
+```text
+长时间没有结果
+  -> 不继续盲等
+  -> 判断是否换方法
+  -> 必要时请求 LLM 给新方案
+  -> 如果继续不划算，就如实总结完成/未完成
+  -> 写入 memory，下一次可以接着做
+```
+
 当前工具：
 
 ```text
@@ -788,6 +886,12 @@ execution_status     Executor 视角的执行状态，例如 completed / complet
 active_execution     当前或最近一次执行尝试摘要
 execution_attempts   所有工具执行尝试记录，会自动追加
 max_tool_duration_ms 单次工具执行预算，当前用于标记超预算
+execution_monitor_status  Watchdog 对执行过程的观察状态
+execution_monitor_reason  Watchdog 的观察原因
+recovery_action      Recovery Planner 给出的恢复动作
+recovery_reason      Recovery Planner 的恢复原因
+partial_result       已经拿到的部分结果，供总结和下次继续
+resume_hint          下次继续任务时的建议入口
 
 max_steps            最大循环轮数
 max_depth            最大任务树深度
@@ -811,6 +915,8 @@ planner.py         Planner / Decomposer
 plan_validator.py  Plan Validator
 policy.py          Tool Policy / Permission Layer
 executor.py        Executor
+execution_monitor.py Execution Monitor / Watchdog
+recovery.py        Recovery Planner
 evaluator.py       Evaluator / Verifier
 simple_nodes.py    search / write / chat / summarize 简单分支
 node_utils.py      多个节点共享的常量和工具函数

@@ -11,11 +11,13 @@ from .evaluator import (
     route_after_task_committer,
     task_committer_node,
 )
+from .execution_monitor import execution_monitor_node, route_after_execution_monitor
 from .executor import executor_node
 from .memory import memory_retriever_node, memory_writer_node, route_after_memory_writer
 from .plan_validator import plan_validator_node, route_after_plan_validator
 from .planner import planner_decomposer_node, route_after_planner, tool_selector_node
 from .policy import route_after_policy, tool_policy_node
+from .recovery import recovery_planner_node, route_after_recovery_planner
 from .router import route_by_task, router_classifier_node
 from .scheduler import route_after_scheduler, scheduler_node
 from .simple_nodes import chat_node, search_node, summarize_node, write_node
@@ -23,6 +25,7 @@ from .simple_nodes import chat_node, search_node, summarize_node, write_node
 __all__ = [
     "chat_node",
     "evaluator_verifier_node",
+    "execution_monitor_node",
     "executor_node",
     "human_approval_node",
     "memory_retriever_node",
@@ -30,15 +33,18 @@ __all__ = [
     "plan_validator_node",
     "planner_decomposer_node",
     "route_after_evaluator",
+    "route_after_execution_monitor",
     "route_after_human_approval",
     "route_after_memory_writer",
     "route_after_plan_validator",
     "route_after_planner",
     "route_after_policy",
+    "route_after_recovery_planner",
     "route_after_scheduler",
     "route_after_task_committer",
     "route_by_task",
     "router_classifier_node",
+    "recovery_planner_node",
     "scheduler_node",
     "search_node",
     "summarize_node",

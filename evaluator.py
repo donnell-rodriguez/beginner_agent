@@ -47,6 +47,18 @@ def _should_skip_llm_evaluation(task: dict[str, Any], state: State) -> tuple[boo
     对 blocked / failed / empty 这类明确状态，本地规则比 LLM 更稳定。
     """
 
+    recovery_action = state.get("recovery_action", "none")
+    if recovery_action == "retry_same":
+        return True, "retry", "Recovery Planner 建议用同一方式重试。"
+    if recovery_action == "retry_with_new_args":
+        return True, "retry", "Recovery Planner 建议调整参数后重试。"
+    if recovery_action in ("replan", "decompose_more", "use_alternative_tool"):
+        return True, "expand", f"Recovery Planner 建议 {recovery_action}，应重新拆解或换方案。"
+    if recovery_action == "ask_human":
+        return True, "fail", "Recovery Planner 判断需要人工确认，当前任务先停止。"
+    if recovery_action == "stop_with_summary":
+        return True, "fail", "Recovery Planner 判断继续消耗不划算，应停止并总结已完成/未完成。"
+
     result_status = str(task.get("tool_result_status") or state["tool_result_status"])
     if result_status in ("blocked", "failed", "empty"):
         decision, reason = _fallback_evaluation(task, state)
@@ -332,6 +344,12 @@ def task_committer_node(state: State) -> dict[str, Any]:
         "reason": reason,
         "tool_result_status": task.get("tool_result_status", "none"),
         "tool_result_data": task.get("tool_result_data") or state.get("tool_result_data", {}),
+        "execution_monitor_status": state.get("execution_monitor_status", "ok"),
+        "execution_monitor_reason": state.get("execution_monitor_reason", ""),
+        "recovery_action": state.get("recovery_action", "none"),
+        "recovery_reason": state.get("recovery_reason", ""),
+        "partial_result": state.get("partial_result", ""),
+        "resume_hint": state.get("resume_hint", ""),
         "parent_evaluation": parent_evaluation,
         "goal_progress": goal_progress,
     }

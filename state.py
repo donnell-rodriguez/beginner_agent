@@ -44,6 +44,17 @@ TaskType = Literal["search", "write", "chat", "agent"]
 # 这个字段主要给 Tool Policy / Permission Layer 使用，
 # 用来决定是否允许执行、是否需要人工确认。
 RiskLevel = Literal["low", "medium", "high"]
+ExecutionMonitorStatus = Literal["ok", "over_budget", "failed", "blocked", "empty", "partial"]
+RecoveryAction = Literal[
+    "none",
+    "retry_same",
+    "retry_with_new_args",
+    "use_alternative_tool",
+    "replan",
+    "decompose_more",
+    "ask_human",
+    "stop_with_summary",
+]
 
 
 # 中文注释：
@@ -296,6 +307,10 @@ NextAction = Literal[
     "approval",
     # 中文注释：进入 Executor，真正执行工具。
     "execute",
+    # 中文注释：进入 Execution Monitor / Watchdog，检查执行是否超预算或卡住。
+    "monitor",
+    # 中文注释：进入 Recovery Planner，决定重试、换方案、重新拆解或停止总结。
+    "recover",
     # 中文注释：进入 Evaluator / Verifier，检查执行结果是否完成、失败、需要重试。
     "evaluate",
     # 中文注释：
@@ -556,6 +571,49 @@ class State(TypedDict):
     # partial：工具返回部分内容，例如被截断。
     # none：还没有执行工具。
     tool_result_status: Literal["success", "failed", "blocked", "empty", "partial", "none"]
+
+    # 中文注释：
+    # execution_monitor_status 是 Watchdog 对最近一次执行的观察结果。
+    #
+    # ok：执行过程正常。
+    # over_budget：执行完成了，但超过 max_tool_duration_ms 预算。
+    # failed：执行失败。
+    # blocked：执行被权限或参数阻断。
+    # empty：执行返回空结果。
+    # partial：执行只返回部分结果。
+    execution_monitor_status: ExecutionMonitorStatus
+
+    # 中文注释：
+    # execution_monitor_reason 是 Watchdog 给出的观察原因。
+    execution_monitor_reason: str
+
+    # 中文注释：
+    # recovery_action 是 Recovery Planner 给出的恢复动作。
+    #
+    # 这就是你提到的“长时间没有结果怎么办”的工程化表达：
+    # - retry_same：同样方式再试一次。
+    # - retry_with_new_args：换参数再试。
+    # - use_alternative_tool：换工具。
+    # - replan：让后续 Planner 基于失败重新规划。
+    # - decompose_more：把任务继续拆小。
+    # - ask_human：交给人类确认。
+    # - stop_with_summary：停止并如实总结已完成/未完成。
+    recovery_action: RecoveryAction
+
+    # 中文注释：
+    # recovery_reason 是 Recovery Planner 的决策原因。
+    recovery_reason: str
+
+    # 中文注释：
+    # partial_result 保存长任务或失败任务已经拿到的部分结果。
+    #
+    # 这样即使任务没有完全成功，Summarizer / Memory Writer 也能如实说明：
+    # 哪些完成了，哪些没完成，下次应该从哪里继续。
+    partial_result: str
+
+    # 中文注释：
+    # resume_hint 保存下一次继续任务时的建议入口。
+    resume_hint: str
 
     # 中文注释：
     # 父任务评估结果。

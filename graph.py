@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .nodes import (
     chat_node,
+    execution_monitor_node,
     evaluator_verifier_node,
     executor_node,
     human_approval_node,
@@ -12,12 +13,15 @@ from .nodes import (
     memory_writer_node,
     plan_validator_node,
     planner_decomposer_node,
+    recovery_planner_node,
     route_after_evaluator,
+    route_after_execution_monitor,
     route_after_human_approval,
     route_after_memory_writer,
     route_after_plan_validator,
     route_after_planner,
     route_after_policy,
+    route_after_recovery_planner,
     route_after_scheduler,
     route_after_task_committer,
     route_by_task,
@@ -45,6 +49,8 @@ from .state import State
 # - policy.py 负责 Tool Policy / Permission Layer。
 # - approval.py 负责 Human Approval。
 # - executor.py 负责真正执行工具。
+# - execution_monitor.py 负责观察执行是否失败、超预算、空结果或部分结果。
+# - recovery.py 负责决定重试、换方案、重新拆解、人工确认或停止总结。
 # - evaluator.py 负责结果验证，task_committer_node 负责重试、继续拆解、失败恢复和 rollback 安排。
 #
 # 这样 graph.py 保持稳定，其他模块可以独立升级。
@@ -68,6 +74,8 @@ def build_graph():
                 -> Tool Policy
                 -> Human Approval（只在需要审批时）
                 -> Executor
+                -> Execution Monitor / Watchdog
+                -> Recovery Planner（只在失败、超预算、空结果、部分结果时）
                 -> Evaluator / Verifier
                 -> Task Committer
                 -> Memory Writer
@@ -106,6 +114,8 @@ def build_graph():
     builder.add_node("tool_policy", tool_policy_node)
     builder.add_node("human_approval", human_approval_node)
     builder.add_node("executor", executor_node)
+    builder.add_node("execution_monitor", execution_monitor_node)
+    builder.add_node("recovery_planner", recovery_planner_node)
     builder.add_node("evaluator_verifier", evaluator_verifier_node)
     builder.add_node("task_committer", task_committer_node)
     builder.add_node("memory_writer", memory_writer_node)
@@ -201,7 +211,28 @@ def build_graph():
 
     # Executor
     # 真正执行工具。写工具执行前后会记录 patch_history，供 rollback 使用。
-    builder.add_edge("executor", "evaluator_verifier")
+    builder.add_edge("executor", "execution_monitor")
+
+    # Execution Monitor / Watchdog
+    # 先判断执行是否超预算、失败、空结果或部分结果。
+    builder.add_conditional_edges(
+        "execution_monitor",
+        route_after_execution_monitor,
+        {
+            "evaluate": "evaluator_verifier",
+            "recover": "recovery_planner",
+        },
+    )
+
+    # Recovery Planner
+    # 如果执行不理想，先决定恢复策略，再交给 Evaluator/Committer 落地。
+    builder.add_conditional_edges(
+        "recovery_planner",
+        route_after_recovery_planner,
+        {
+            "evaluate": "evaluator_verifier",
+        },
+    )
 
     # Evaluator / Verifier
     # 只检查工具结果，产出 complete / retry / expand / fail。

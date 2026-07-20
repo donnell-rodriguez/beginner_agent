@@ -190,6 +190,21 @@ def run_case(user_input: str) -> None:
             "tool_result_status": "none",
 
             # 中文注释：
+            # Execution Monitor / Watchdog 对最近一次执行的观察状态。
+            "execution_monitor_status": "ok",
+            "execution_monitor_reason": "",
+
+            # 中文注释：
+            # Recovery Planner 对失败、超预算、部分结果的恢复决策。
+            "recovery_action": "none",
+            "recovery_reason": "",
+
+            # 中文注释：
+            # partial_result 和 resume_hint 用于“如实总结”和“下次继续”。
+            "partial_result": "",
+            "resume_hint": "",
+
+            # 中文注释：
             # parent_evaluation 保存“子任务完成后，父任务状态如何变化”。
             "parent_evaluation": {},
 
