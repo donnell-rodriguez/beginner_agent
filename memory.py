@@ -37,6 +37,8 @@ MEMORY_AUDIT_FILE = MEMORY_DIR / "memory_audit.jsonl"
 MAX_MEMORY_RECORDS = 500
 MAX_MEMORY_AUDIT_EVENTS = 1000
 MAX_RETRIEVED_RECORDS = 8
+MAX_RERANK_CANDIDATES = 24
+MIN_RERANK_SCORE = 0.25
 MAX_INDEXED_VECTOR_DIMENSION = 2000
 MAX_MEMORY_TEXT_CHARS = 2000
 DEFAULT_MEMORY_TTL_DAYS = 30
@@ -115,9 +117,10 @@ SENSITIVE_FIELD_NAMES = {
 # - 增加 MemoryPromotion，把多次成功/人工确认的记忆晋升为 pinned。
 # - 增加 MemoryAudit，记录哪条记忆影响了哪个 Planner/Evaluator 决策。
 # - 清理 expires_at 已过期的非 pinned 记忆。
+# - 增加 MemoryReranker，对候选记忆做任务相关性、可靠性和误导风险重排。
 #
 # 后续 TODO：
-# - 增加 MemoryReranker，用 reranker 或 LLM judge 做最终排序。
+# - 把当前本地特征 MemoryReranker 增强为 cross-encoder / LLM judge。
 # - 把 MemoryAudit 接到独立查询 API / dashboard。
 
 
@@ -1870,6 +1873,206 @@ def _score_record(record: dict[str, Any], state: State) -> int:
     return score
 
 
+def _float_record_value(record: dict[str, Any], key: str, default: float) -> float:
+    """安全读取 record 里的数字字段。"""
+
+    try:
+        return float(record.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _tokenize_for_rerank(text: str) -> set[str]:
+    """把文本切成适合轻量 reranker 使用的 token 集合。"""
+
+    normalized = re.sub(r"[^0-9A-Za-z_\-/.\u4e00-\u9fff]+", " ", text.lower())
+    return {token for token in normalized.split() if len(token) >= 2}
+
+
+def _rerank_query_text(state: State) -> str:
+    """构造 reranker 使用的任务文本。"""
+
+    current_task = state["task_tree"].get(state["current_task_id"], {})
+    task_title = str(current_task.get("title", "")) if isinstance(current_task, dict) else ""
+    return "\n".join(
+        [
+            str(state.get("user_input", "")),
+            task_title,
+            str(state.get("tool_name", "none")),
+            str(state.get("tool_result_status", "none")),
+        ]
+    )
+
+
+def _record_rerank_text(record: dict[str, Any]) -> str:
+    """构造 reranker 使用的记忆文本。"""
+
+    return "\n".join(
+        [
+            str(record.get("title", "")),
+            str(record.get("summary", "")),
+            str(record.get("tool_name", "")),
+            str(record.get("tool_result_status", "")),
+            " ".join(str(tag) for tag in record.get("tags", [])),
+            " ".join(str(path) for path in record.get("paths", [])),
+        ]
+    )
+
+
+def _recency_score(record: dict[str, Any]) -> float:
+    """越新的记忆分数越高，pinned/long_term 不被强烈惩罚。"""
+
+    if record.get("pinned") or record.get("retention_policy") in {"pinned", "long_term"}:
+        return 1.0
+    created_at = _record_created_at(record)
+    age_days = max(0.0, (datetime.now(timezone.utc) - created_at).total_seconds() / 86400)
+    if age_days <= 7:
+        return 1.0
+    if age_days <= 30:
+        return 0.75
+    if age_days <= 90:
+        return 0.45
+    return 0.2
+
+
+def _path_overlap_score(record: dict[str, Any], state: State) -> float:
+    """判断记忆路径和当前任务路径是否重合。"""
+
+    current_task = state["task_tree"].get(state["current_task_id"], {})
+    args = current_task.get("args", {}) if isinstance(current_task, dict) else {}
+    current_path = str(args.get("path", "")) if isinstance(args, dict) else ""
+    if not current_path:
+        return 0.0
+    paths = {str(path) for path in record.get("paths", [])}
+    if current_path in paths:
+        return 1.0
+    current_parts = set(Path(current_path).parts)
+    for path in paths:
+        if current_parts.intersection(Path(path).parts):
+            return 0.5
+    return 0.0
+
+
+def _reliability_score(record: dict[str, Any]) -> float:
+    """评估这条记忆是否可信。"""
+
+    confidence = _float_record_value(record, "confidence", 0.7)
+    importance = _float_record_value(record, "importance", 0.5)
+    status_bonus = 0.2 if record.get("tool_result_status") == "success" else 0.0
+    pinned_bonus = 0.25 if record.get("pinned") else 0.0
+    failure_penalty = 0.15 if record.get("kind") == "failure" else 0.0
+    score = (
+        (confidence * 0.45)
+        + (importance * 0.35)
+        + status_bonus
+        + pinned_bonus
+        - failure_penalty
+    )
+    return max(0.0, min(1.0, score))
+
+
+def _misleading_risk_score(record: dict[str, Any], state: State) -> float:
+    """估计记忆误导当前任务的风险，分数越高风险越大。"""
+
+    if record.get("pinned"):
+        return 0.0
+    risk = 0.0
+    if record.get("kind") == "failure" and state.get("tool_result_status") == "success":
+        risk += 0.25
+    if record.get("validity_status", "active") != "active":
+        risk += 1.0
+    if _recency_score(record) <= 0.2:
+        risk += 0.2
+    if (
+        record.get("tool_name") not in {state.get("tool_name"), "none", ""}
+        and _path_overlap_score(record, state) == 0
+    ):
+        risk += 0.15
+    return min(1.0, risk)
+
+
+def _semantic_score(record: dict[str, Any]) -> float:
+    """把 pgvector distance 转成 0..1 的相似度分数。"""
+
+    if "vector_distance" not in record:
+        return 0.0
+    distance = _float_record_value(record, "vector_distance", 1.0)
+    return max(0.0, min(1.0, 1.0 - distance))
+
+
+def _rerank_memory_candidates(
+    records: list[dict[str, Any]],
+    state: State,
+) -> list[dict[str, Any]]:
+    """对召回后的记忆做任务感知重排。
+
+    中文注释：
+    这一步对应生产系统里的 MemoryReranker。
+    它不负责“能不能访问”，访问边界仍由 scope / validity / TTL 硬规则控制。
+    它负责回答：
+    - 这条记忆对当前任务是否真的有帮助？
+    - 这条记忆可靠性高不高？
+    - 这条记忆会不会误导当前任务？
+    - 是否应该进入 memory_context？
+
+    当前实现是稳定的本地特征 reranker。
+    后续可以把它替换成 cross-encoder / LLM judge。
+    """
+
+    query_tokens = _tokenize_for_rerank(_rerank_query_text(state))
+    reranked: list[dict[str, Any]] = []
+    for record in records[:MAX_RERANK_CANDIDATES]:
+        record_tokens = _tokenize_for_rerank(_record_rerank_text(record))
+        token_overlap = (
+            len(query_tokens.intersection(record_tokens)) / max(1, len(query_tokens))
+        )
+        semantic = _semantic_score(record)
+        rule_score = _float_record_value(record, "rule_score", 0.0)
+        normalized_rule = min(1.0, rule_score / 12.0)
+        reliability = _reliability_score(record)
+        recency = _recency_score(record)
+        path_overlap = _path_overlap_score(record, state)
+        risk = _misleading_risk_score(record, state)
+        pinned = 1.0 if record.get("pinned") else 0.0
+
+        score = (
+            semantic * 0.28
+            + normalized_rule * 0.20
+            + token_overlap * 0.18
+            + reliability * 0.16
+            + recency * 0.08
+            + path_overlap * 0.07
+            + pinned * 0.08
+            - risk * 0.20
+        )
+        score = max(0.0, min(1.0, score))
+        decision = "include" if score >= MIN_RERANK_SCORE or record.get("pinned") else "drop"
+        reranked.append(
+            {
+                **record,
+                "rerank_score": round(score, 4),
+                "rerank_decision": decision,
+                "rerank_reason": (
+                    "task-aware reranker: semantic/rule/token/reliability/"
+                    "recency/path/risk weighted score"
+                ),
+                "rerank_features": {
+                    "semantic": round(semantic, 4),
+                    "rule": round(normalized_rule, 4),
+                    "token_overlap": round(token_overlap, 4),
+                    "reliability": round(reliability, 4),
+                    "recency": round(recency, 4),
+                    "path_overlap": round(path_overlap, 4),
+                    "misleading_risk": round(risk, 4),
+                    "pinned": bool(record.get("pinned")),
+                },
+            }
+        )
+    included = [record for record in reranked if record["rerank_decision"] == "include"]
+    included.sort(key=lambda record: float(record.get("rerank_score", 0)), reverse=True)
+    return included[:MAX_RETRIEVED_RECORDS]
+
+
 def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str, str]:
     """检索和当前目标最相关的历史记忆。"""
 
@@ -1914,11 +2117,12 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
                 "rule_score": score,
                 "retrieval_score": score / 10,
             }
-    results = sorted(
+    candidates = sorted(
         merged.values(),
         key=lambda record: float(record.get("retrieval_score", 0)),
         reverse=True,
-    )[:MAX_RETRIEVED_RECORDS]
+    )
+    results = _rerank_memory_candidates(candidates, state)
     errors = "; ".join(error for error in (backend_error, vector_error) if error)
     if vector_records:
         backend = f"{backend}+vector"
@@ -1936,7 +2140,7 @@ def memory_retriever_node(state: State) -> dict[str, object]:
     - 当前 State 里的短期记忆。
     - JSONL / Postgres 里的持久化记忆。
     - 默认过滤 superseded / rejected / expired 记忆。
-    - 根据 scope、importance、confidence、pinned 做排序。
+    - 先做 pgvector / rule 召回，再用 MemoryReranker 做任务感知重排。
 
     这样 agent 下一次运行时，也能看到之前任务沉淀下来的经验。
     """
@@ -1972,6 +2176,17 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "importance",
                 "confidence",
                 "pinned",
+                "rerank_score",
+            ],
+            "reranker": [
+                "task_aware",
+                "semantic_similarity",
+                "rule_score",
+                "token_overlap",
+                "reliability",
+                "recency",
+                "path_overlap",
+                "misleading_risk",
             ],
         },
         "state_note_count": len(state_notes),
