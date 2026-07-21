@@ -14,6 +14,7 @@ from beginner_agent.memory import (
     _read_jsonl_audit_events,
     _upsert_memory_audit_event,
 )
+from beginner_agent.run_lineage import lineage_for_run_id
 
 from .models import AuditQuery, MemoryQuery
 
@@ -123,6 +124,11 @@ def _matches_memory_query(record: dict[str, Any], query: MemoryQuery) -> bool:
 
 def _matches_audit_query(event: dict[str, Any], query: AuditQuery) -> bool:
     if query.memory_id and str(event.get("memory_id", "")) != query.memory_id:
+        return False
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if query.run_id and str(metadata.get("run_id", "")) != query.run_id:
         return False
     if query.action and str(event.get("action", "")) != query.action:
         return False
@@ -315,6 +321,13 @@ class MemoryQueryRepository:
         )
         records.sort(key=lambda record: str(record.get("created_at", "")))
         return records, backend, error
+
+    def run_lineage(self, run_id: str) -> tuple[dict[str, Any], str, str]:
+        """查询某次 run 的 lineage 报告。"""
+
+        data = lineage_for_run_id(run_id)
+        audit = data.get("audit", {}) if isinstance(data, dict) else {}
+        return data, str(audit.get("backend", "")), str(audit.get("backend_error", ""))
 
     def failure_patterns(
         self,

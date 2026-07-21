@@ -1614,6 +1614,7 @@ def _audit_sensitive_memory_access(
                 ),
                 backend=backend,
                 metadata={
+                    "run_id": state["run_id"],
                     "access_context": context,
                     "access_control": _safe_memory_value(access_control),
                     "sensitivity_level": sensitivity,
@@ -2356,6 +2357,13 @@ def _govern_memory_record_before_write(
 def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str, MemoryRecord]:
     """写入 memory record，并返回 backend 信息。"""
 
+    def with_run_id(event: MemoryAuditEvent, run_id: str) -> MemoryAuditEvent:
+        if not run_id:
+            return event
+        return event.model_copy(
+            update={"metadata": {**event.metadata, "run_id": run_id}}
+        )
+
     try:
         store = _configured_store()
         existing_records = store.list_records(MAX_MEMORY_RECORDS)
@@ -2365,8 +2373,9 @@ def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str, MemoryRecord]
             backend=store.backend_name,
         )
         store.upsert_record(governed_record)
+        run_id = str(governed_record.metadata.get("run_id", ""))
         for event in governance_events:
-            store.upsert_audit_event(event)
+            store.upsert_audit_event(with_run_id(event, run_id))
         store.upsert_audit_event(
             _build_audit_event(
                 action="store",
@@ -2379,6 +2388,7 @@ def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str, MemoryRecord]
                     "retention_policy": governed_record.retention_policy,
                     "importance": governed_record.importance,
                     "pinned": governed_record.pinned,
+                    "run_id": governed_record.metadata.get("run_id", ""),
                 },
             )
         )
@@ -2392,8 +2402,9 @@ def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str, MemoryRecord]
             backend=fallback.backend_name,
         )
         fallback.upsert_record(governed_record)
+        run_id = str(governed_record.metadata.get("run_id", ""))
         for event in governance_events:
-            fallback.upsert_audit_event(event)
+            fallback.upsert_audit_event(with_run_id(event, run_id))
         fallback.upsert_audit_event(
             _build_audit_event(
                 action="fallback",
@@ -2404,6 +2415,7 @@ def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str, MemoryRecord]
                     "error": str(exc),
                     "kind": governed_record.kind,
                     "tool_name": governed_record.tool_name,
+                    "run_id": governed_record.metadata.get("run_id", ""),
                 },
             )
         )
@@ -2597,6 +2609,7 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
                 "action": policy.action,
                 "reason": policy.reason,
             },
+            "run_id": state["run_id"],
             "memory_access_control": _safe_memory_value(acl),
             "privacy_governance": privacy_metadata(privacy_report),
             "preference_memory": _safe_memory_value(preference) if preference else {},
@@ -2999,6 +3012,7 @@ def memory_retriever_node(state: State) -> dict[str, object]:
             reason="Memory Retriever 将相关记忆写入 memory_context。",
             backend=backend,
             metadata={
+                "run_id": state["run_id"],
                 "retrieved_memory_ids": retrieved_ids,
                 "retrieved_count": len(retrieved_ids),
                 "backend_error": backend_error,

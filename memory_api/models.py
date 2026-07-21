@@ -46,6 +46,6 @@ class AuditQuery(BaseModel):
 
     limit: int = Field(default=100, ge=1, le=1000)
     memory_id: str | None = None
+    run_id: str | None = None
     action: str | None = None
     include_sensitive: bool = False
-

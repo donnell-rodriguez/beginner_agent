@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from .observability_store import ObservabilityStore
+from .run_lineage import build_run_lineage_report
 from .state import State
 
 
@@ -54,12 +55,14 @@ def observability_reporter_node(state: State) -> dict[str, Any]:
         "async_job": state.get("async_job_report", {}),
         "artifacts": state.get("artifact_report", {}),
     }
+    report["lineage"] = build_run_lineage_report(state)
     report["storage"] = ObservabilityStore().record_report(
         run_id=state["run_id"],
         report=report,
     )
     return {
         "observability_report": report,
+        "run_lineage_report": report["lineage"],
         "messages": [
             {
                 "role": "assistant",

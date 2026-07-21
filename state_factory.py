@@ -55,6 +55,7 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
         "async_job_report": {},
         "artifact_report": {},
         "observability_report": {},
+        "run_lineage_report": {},
         "root_task_id": "root",
         "task_tree": {},
         "agenda": [],

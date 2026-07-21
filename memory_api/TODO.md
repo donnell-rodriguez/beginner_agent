@@ -12,6 +12,7 @@
 - `GET /pinned`
 - `GET /failures/patterns`
 - `GET /files/{file_path:path}/memories`
+- `GET /runs/{run_id}/lineage`
 
 后续 Dashboard / Admin UI 可以继续补：
 
@@ -25,4 +26,5 @@
 - pinned preference 页面：查看长期用户偏好和项目偏好，支持人工禁用或覆盖。
 - 敏感信息审批：`include_sensitive=true` 需要管理员确认和额外审计。
 - 指标看板：memory 写入量、命中率、过期率、rejected 率、失败复用率。
+- run lineage 页面：按 run_id 查看 checkpoint、memory、tool result、audit event 和最终状态。
 - OpenAPI 导出：用于给前端或其他 agent 自动发现查询能力。

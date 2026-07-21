@@ -481,6 +481,19 @@ class State(TypedDict):
     observability_report: dict[str, Any]
 
     # 中文注释：
+    # run_lineage_report 是某次 run 的完整运行链路。
+    #
+    # 它把以下内容串起来：
+    # - checkpoint：这次运行用哪个 checkpoint 后端。
+    # - memory：读取了哪些记忆、生成了哪些记忆。
+    # - tool result：执行了哪个工具，结果是否成功。
+    # - audit event：产生了哪些治理/隐私/记忆审计事件。
+    # - observability：最后是否完成，目标进度如何。
+    #
+    # 这就是更强系统里的 run-level lineage / trace。
+    run_lineage_report: dict[str, Any]
+
+    # 中文注释：
     # root_task_id 是整棵任务树的根任务 id。
     root_task_id: str
 

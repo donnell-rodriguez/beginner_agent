@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
     def audit(
         limit: int = Query(default=100, ge=1, le=1000),
         memory_id: str | None = None,
+        run_id: str | None = None,
         action: str | None = None,
         include_sensitive: bool = False,
     ) -> MemoryApiResponse:
@@ -110,11 +111,17 @@ def create_app() -> FastAPI:
             AuditQuery(
                 limit=limit,
                 memory_id=memory_id,
+                run_id=run_id,
                 action=action,
                 include_sensitive=include_sensitive,
             )
         )
         return _response(events, backend, error)
+
+    @app.get("/runs/{run_id}/lineage", response_model=MemoryApiResponse)
+    def run_lineage(run_id: str) -> MemoryApiResponse:
+        data, backend, error = repository.run_lineage(run_id)
+        return _response(data, backend, error)
 
     @app.get("/contradictions/{contradiction_key}", response_model=MemoryApiResponse)
     def contradiction_evolution(
