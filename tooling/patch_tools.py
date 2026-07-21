@@ -23,7 +23,7 @@ from .check_tools import lint_typecheck_tool
 # 中文注释：
 # patch_tools.py 放“会修改文件”的工具。
 #
-# 这些工具风险比只读工具高，所以 Policy 层默认要求 Human Approval。
+# 这些工具风险比只读工具高，所以 Policy 层默认要求 Approval Interrupt。
 # 当前实现仍然很保守：
 #   - 只能改 beginner_agent 内部文本文件。
 #   - apply_patch 只能做 old_text -> new_text 的精确替换。
@@ -211,7 +211,7 @@ def preview_patch_tool(path: str, old_text: str, new_text: str) -> str:
 
     中文注释：
     生产级 code agent 在真正改文件前，通常会先生成 preview。
-    这样 Planner / Policy / Human Approval 可以看到“准备怎么改”。
+    这样 Planner / Policy / Approval Interrupt 可以看到“准备怎么改”。
     """
 
     file_path = safe_text_file(path)
@@ -263,7 +263,9 @@ def validate_patch_scope_tool(path: str, goal: str = "") -> str:
     if file_path.name in ("state.py", "graph.py", "planner.py", "executor.py", "policy.py"):
         warnings.append("这是 agent 核心流程文件，修改后必须运行测试。")
     if file_path.suffix != ".py":
-        warnings.append("目标不是 Python 文件，静态检查可能无法覆盖语义问题。")
+        warnings.append(
+            "目标不是 Python 文件，静态检查可能无法覆盖语义问题。"
+        )
     if goal and any(word in goal for word in ("删除", "清空", "密钥", "密码", "token")):
         warnings.append("修改目标包含高风险词，需要人工审批。")
     return json_dumps({"path": path, "allowed": True, "risk_notes": warnings})
@@ -295,7 +297,10 @@ def apply_patch_plan_tool(patch_plan_id: str) -> str:
     current = file_path.read_text(encoding="utf-8", errors="replace")
     validated_hash = str(plan.get("validated_file_hash", ""))
     if not validated_hash or _file_hash_text(current) != validated_hash:
-        return "apply_patch_plan 失败：目标文件在验证后发生变化，请重新 validate_patch_plan。"
+        return (
+            "apply_patch_plan 失败："
+            "目标文件在验证后发生变化，请重新 validate_patch_plan。"
+        )
     validation = json.loads(validate_patch_plan_tool(patch_plan_id))
     if not validation.get("valid"):
         return "apply_patch_plan 失败：\n" + json_dumps(validation)

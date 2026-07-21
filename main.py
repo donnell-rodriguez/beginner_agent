@@ -86,7 +86,7 @@ def run_case(user_input: str) -> None:
     #
     # 注意：
     #   run_case 是非交互 demo。
-    #   如果任务触发 Human Approval interrupt，请使用 cli.py。
+    #   如果任务触发 Approval Interrupt，请使用 cli.py。
     result = graph.invoke(
         initial_state,
         config={"configurable": {"thread_id": "beginner-agent-demo"}},

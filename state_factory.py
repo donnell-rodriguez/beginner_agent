@@ -47,6 +47,11 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
         "memory_notes": [],
         "memory_context": {},
         "pending_memory": {},
+        "checkpoint_report": {},
+        "sandbox_report": {},
+        "async_job_report": {},
+        "artifact_report": {},
+        "observability_report": {},
         "root_task_id": "root",
         "task_tree": {},
         "agenda": [],
@@ -77,7 +82,7 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
             **{tool_name: "allow" for tool_name in READ_ONLY_TOOLS},
             # 中文注释：
             # 写工具默认 ask。
-            # 真实执行前会进入 Tool Policy，再进入 Human Approval。
+            # 真实执行前会进入 Tool Policy，再进入 Approval Interrupt。
             **{tool_name: "ask" for tool_name in WRITE_TOOLS},
         },
         "messages": [

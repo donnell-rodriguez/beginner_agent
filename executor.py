@@ -127,7 +127,10 @@ def _preflight_write_tool(state: State, tool_name: str, tool_args: dict[str, Any
         return ""
     task = dict(state["task_tree"].get(state["current_task_id"], {}))
     if state["policy_decision"] != "allow":
-        return "Executor preflight 拒绝：写工具必须先通过 Tool Policy / Human Approval。"
+        return (
+            "Executor preflight 拒绝："
+            "写工具必须先通过 Tool Policy / Approval Interrupt。"
+        )
 
     if tool_name == "apply_patch" and not task.get("allow_direct_patch", False):
         return (
@@ -321,7 +324,10 @@ def executor_node(state: State) -> dict[str, Any]:
         tool_result_data=tool_result_data,
     )
     task["status"] = "executed" if result_status != "blocked" else "failed"
-    if tool_name in {"apply_patch", "apply_patch_plan", "format_apply"} and result_status == "success":
+    if (
+        tool_name in {"apply_patch", "apply_patch_plan", "format_apply"}
+        and result_status == "success"
+    ):
         path = write_target_path or str(tool_args.get("path", ""))
         after_content = ""
         if path:

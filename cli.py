@@ -22,7 +22,7 @@ def _extract_interrupt(chunk: dict[str, Any]) -> dict[str, Any] | None:
     """从 LangGraph stream chunk 中取出 interrupt payload。
 
     中文注释：
-    当 human_approval_node 调用 interrupt(...) 时，
+    当 approval_interrupt_node 调用 interrupt(...) 时，
     graph.stream(...) 会吐出类似：
 
         {"__interrupt__": (Interrupt(value={...}),)}
@@ -68,7 +68,11 @@ def _ask_human(payload: dict[str, Any]) -> dict[str, Any]:
     """
 
     _print_approval_request(payload)
-    answer = input("\n是否批准执行这个工具？输入 y 批准，其他任意输入拒绝：").strip().lower()
+    answer = (
+        input("\n是否批准执行这个工具？输入 y 批准，其他任意输入拒绝：")
+        .strip()
+        .lower()
+    )
     approved = answer in {"y", "yes", "approve", "approved"}
     return {
         "approved": approved,
@@ -95,7 +99,7 @@ def _stream_until_interrupt_or_done(graph: Any, graph_input: Any, config: dict[s
 
 
 def run_cli(user_input: str, *, thread_id: str | None = None) -> Any:
-    """运行支持 Human Approval interrupt 的 CLI。"""
+    """运行支持 Approval Interrupt 的 CLI。"""
 
     graph = build_graph()
     config = {"configurable": {"thread_id": thread_id or f"beginner-agent-cli-{uuid.uuid4()}"}}
@@ -113,8 +117,12 @@ def run_cli(user_input: str, *, thread_id: str | None = None) -> Any:
 def main() -> None:
     """命令行入口。"""
 
-    parser = argparse.ArgumentParser(description="Run beginner_agent with CLI human approval.")
-    parser.add_argument("user_input", nargs="*", help="用户任务。为空时进入交互输入。")
+    parser = argparse.ArgumentParser(description="Run beginner_agent with CLI approval interrupt.")
+    parser.add_argument(
+        "user_input",
+        nargs="*",
+        help="用户任务。为空时进入交互输入。",
+    )
     parser.add_argument("--thread-id", default=None, help="LangGraph checkpoint thread_id。")
     args = parser.parse_args()
 

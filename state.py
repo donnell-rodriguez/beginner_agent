@@ -30,7 +30,8 @@ from typing_extensions import TypedDict
 # search：偏资料查找、检索、搜索。
 # write：偏写作、生成、润色、总结。
 # chat：普通问答，不一定需要工具。
-# agent：复杂任务，需要进入多步骤 agent loop，例如读代码、拆任务、调用工具、验证结果。
+# agent：复杂任务，需要进入多步骤 agent loop。
+# 例如读代码、拆任务、调用工具、验证结果。
 TaskType = Literal["search", "write", "chat", "agent"]
 
 
@@ -58,7 +59,7 @@ RecoveryAction = Literal[
 
 
 # 中文注释：
-    # ToolName 是当前 Agent 支持的工具名清单。
+# ToolName 是当前 Agent 支持的工具名清单。
 #
 # 你可以把它理解成“Agent 的工具箱目录”。
 #
@@ -80,7 +81,8 @@ ToolName = Literal[
     # 中文注释：
     # 文件读取类工具。
     # read_file：读取完整文件。
-    # read_file_slice：只读取某个文件的一部分，适合大文件，避免一次输出太多。
+    # read_file_slice：只读取某个文件的一部分。
+    # 适合大文件，避免一次输出太多。
     "read_file",
     "read_file_slice",
 
@@ -303,24 +305,35 @@ NextAction = Literal[
     # 中文注释：进入 Tool Policy / Permission Layer，检查工具是否允许执行。
     "policy",
     # 中文注释：
-    # 进入 Human Approval，处理需要人工确认的工具调用。
+    # 进入 Approval Interrupt，处理需要人工确认的工具调用。
     "approval",
+    # 中文注释：进入 Sandbox Runner，准备受控运行边界。
+    "sandbox",
     # 中文注释：进入 Executor，真正执行工具。
     "execute",
+    # 中文注释：进入 Async Job Waiter，等待后台任务或确认同步完成。
+    "wait",
     # 中文注释：进入 Execution Monitor / Watchdog，检查执行是否超预算或卡住。
     "monitor",
-    # 中文注释：进入 Recovery Planner，决定重试、换方案、重新拆解或停止总结。
+    # 中文注释：
+    # 进入 Recovery Planner，决定重试、换方案、重新拆解或停止总结。
     "recover",
-    # 中文注释：进入 Evaluator / Verifier，检查执行结果是否完成、失败、需要重试。
+    # 中文注释：
+    # 进入 Evaluator / Verifier，检查执行结果是否完成、失败、需要重试。
     "evaluate",
     # 中文注释：
     # 进入 Task Committer，把 Evaluator 的判断真正写回 task_tree / agenda / memory。
     #
-    # 这样 Evaluator 只负责“判断”，Committer 只负责“落库式更新状态”，职责更清楚。
+    # 这样 Evaluator 只负责“判断”，
+    # Committer 只负责“落库式更新状态”，职责更清楚。
     "commit",
     # 中文注释：
     # 进入 Memory Writer，把本轮产生的结构化经验写入 memory_notes。
     "memory",
+    # 中文注释：进入 Artifact Collector，收集补丁、改动文件和验证产物。
+    "artifact",
+    # 中文注释：进入 Observability Reporter，汇总运行报告。
+    "observability",
     # 中文注释：进入最终汇总，结束 agent loop。
     "finish",
 ]
@@ -359,7 +372,7 @@ class State(TypedDict):
     # plan：进入 Planner / Decomposer。
     # validate：进入 Plan Validator。
     # policy：进入 Tool Policy / Permission Layer。
-    # approval：进入 Human Approval，等待或检查人工审批。
+    # approval：进入 Approval Interrupt，等待或检查人工审批。
     # execute：进入 Executor。
     # evaluate：进入 Evaluator / Verifier。
     # commit：进入 Task Committer，把评估结论写回任务树和记忆。
@@ -401,6 +414,38 @@ class State(TypedDict):
     # 因为现在我们把“状态提交”和“记忆写入”拆成两个节点，
     # 这样更接近生产系统里的职责边界。
     pending_memory: dict[str, Any]
+
+    # 中文注释：
+    # checkpoint_report 记录当前 LangGraph checkpoint 后端。
+    #
+    # 真正 checkpoint 保存发生在 graph.py 的 compile(checkpointer=...)。
+    # 这个字段只是把运行时 checkpoint 信息暴露给 Summary / Observability。
+    checkpoint_report: dict[str, Any]
+
+    # 中文注释：
+    # sandbox_report 记录 Sandbox Runner 对当前工具调用的运行边界判断。
+    #
+    # 当前是本地受控工具层；后续可以升级成容器 sandbox 或远程 runner。
+    sandbox_report: dict[str, Any]
+
+    # 中文注释：
+    # async_job_report 记录 Async Job Waiter 的等待状态。
+    #
+    # 当前大多数工具同步完成；后续接远程 worker 时可以保存 job_id / 状态。
+    async_job_report: dict[str, Any]
+
+    # 中文注释：
+    # artifact_report 保存本轮 agent 产物索引。
+    #
+    # 例如修改文件、patch 数量、验证任务、执行尝试数量。
+    artifact_report: dict[str, Any]
+
+    # 中文注释：
+    # observability_report 保存可观测性报告。
+    #
+    # 它让最终 summary 能看到 step_count、task 状态分布、checkpoint、
+    # sandbox、async job、artifact、policy、recovery 等信息。
+    observability_report: dict[str, Any]
 
     # 中文注释：
     # root_task_id 是整棵任务树的根任务 id。
@@ -474,7 +519,8 @@ class State(TypedDict):
     # active_execution 保存当前正在执行或最近一次执行的摘要。
     #
     # 它类似生产系统里的 job/run record：
-    # 记录 task_id、tool_name、开始时间、结束时间、耗时、是否长任务工具等。
+    # 记录 task_id、tool_name、开始时间、结束时间、耗时、
+    # 是否长任务工具等。
     active_execution: dict[str, Any]
 
     # 中文注释：
@@ -496,7 +542,7 @@ class State(TypedDict):
     # human_approvals 保存已经完成的人工审批结果。
     #
     # key 是 task_id，value 是 True / False。
-    # 写文件工具默认需要审批，Human Approval 会通过 LangGraph interrupt
+    # 写文件工具默认需要审批，Approval Interrupt 会通过 LangGraph interrupt
     # 暂停图执行，等 CLI / UI 用 Command(resume=...) 恢复。
     human_approvals: dict[str, bool]
 

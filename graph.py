@@ -4,21 +4,26 @@ from langgraph.graph import END, START, StateGraph
 
 from .checkpointing import build_checkpointer
 from .nodes import (
+    approval_interrupt_node,
+    artifact_collector_node,
+    async_job_waiter_node,
     chat_node,
     code_agent_summarize_node,
     execution_monitor_node,
     evaluator_verifier_node,
     executor_node,
-    human_approval_node,
     memory_retriever_node,
     memory_writer_node,
+    observability_reporter_node,
     plan_validator_node,
     planner_decomposer_node,
+    postgres_checkpoint_node,
     recovery_planner_node,
+    route_after_approval_interrupt,
     route_after_evaluator,
     route_after_execution_monitor,
-    route_after_human_approval,
     route_after_memory_writer,
+    route_after_observability_reporter,
     route_after_plan_validator,
     route_after_planner,
     route_after_policy,
@@ -27,6 +32,7 @@ from .nodes import (
     route_after_task_committer,
     route_by_task,
     router_classifier_node,
+    sandbox_runner_node,
     scheduler_node,
     search_node,
     simple_summarize_node,
@@ -48,12 +54,17 @@ from .state import State
 # - planner.py 负责拆解任务，tool_selector_node 负责选择工具。
 # - plan_validator.py 负责计划质量和工具参数可执行性检查。
 # - policy.py 负责 Tool Policy / Permission Layer。
-# - approval.py 负责 Human Approval。
+# - approval.py 负责 Approval Interrupt。
+# - sandbox.py 负责 Sandbox Runner。
 # - executor.py 负责真正执行工具。
+# - async_jobs.py 负责 Async Job Waiter。
 # - execution_monitor.py 负责观察执行是否失败、超预算、空结果或部分结果。
 # - recovery.py 负责决定重试、换方案、重新拆解、人工确认或停止总结。
 # - evaluator.py 负责结果验证。
 # - task_committer_node 负责重试、继续拆解、失败恢复和 rollback 安排。
+# - artifacts.py 负责 Artifact Collector。
+# - observability.py 负责 Observability Reporter。
+# - checkpoint_node.py 负责把 checkpoint 后端暴露到 State。
 #
 # 这样 graph.py 保持稳定，其他模块可以独立升级。
 
@@ -75,24 +86,33 @@ def build_graph():
                 -> Tool Selector
                 -> Plan Validator
                 -> Tool Policy
-                -> Human Approval（只在需要审批时）
+                -> Approval Interrupt（只在需要审批时）
+                -> Sandbox Runner
                 -> Executor
+                -> Async Job Waiter
                 -> Execution Monitor / Watchdog
                 -> Recovery Planner（只在失败、超预算、空结果、部分结果时）
                 -> Evaluator / Verifier
                 -> Task Committer
                 -> Memory Writer
+                -> Artifact Collector
+                -> Observability Reporter
                 -> Scheduler 或 Code Agent Summary
           -> END
 
     注意：
     - patch planning 现在由 Planner + patch_plan/validate_patch_plan 工具承担。
-    - approval gate 现在由 tool_policy_node + human_approval_node 承担。
+    - approval gate 现在由 tool_policy_node + approval_interrupt_node 承担。
+    - sandbox runner 现在先记录本地受控运行边界。
+      后续可升级成容器或远程 sandbox。
+    - async job waiter 现在记录同步/异步状态，后续可升级成远程 worker 轮询。
     - test runner 现在由 run_tests / run_targeted_tests / run_impacted_tests 工具承担。
     - failure analyzer 现在由 evaluator_verifier_node 承担。
     - retry / rollback / memory commit 现在由 task_committer_node 承担。
+    - artifact collector / observability reporter 已经是独立节点。
     - memory retriever/writer 已经是独立节点。
     - checkpoint 仍然属于 LangGraph runtime 层，由 compile(checkpointer=...) 配置。
+      postgres_checkpoint_node 只负责把后端信息写入 State，方便最终报告展示。
     """
 
     builder = StateGraph(State)
@@ -115,13 +135,18 @@ def build_graph():
     builder.add_node("tool_selector", tool_selector_node)
     builder.add_node("plan_validator", plan_validator_node)
     builder.add_node("tool_policy", tool_policy_node)
-    builder.add_node("human_approval", human_approval_node)
+    builder.add_node("approval_interrupt", approval_interrupt_node)
+    builder.add_node("sandbox_runner", sandbox_runner_node)
     builder.add_node("executor", executor_node)
+    builder.add_node("async_job_waiter", async_job_waiter_node)
     builder.add_node("execution_monitor", execution_monitor_node)
     builder.add_node("recovery_planner", recovery_planner_node)
     builder.add_node("evaluator_verifier", evaluator_verifier_node)
     builder.add_node("task_committer", task_committer_node)
     builder.add_node("memory_writer", memory_writer_node)
+    builder.add_node("artifact_collector", artifact_collector_node)
+    builder.add_node("observability_reporter", observability_reporter_node)
+    builder.add_node("postgres_checkpoint", postgres_checkpoint_node)
 
     # 4. 最终汇总节点。
     # 简单任务和复杂 code-agent 任务的汇总信息密度不同，
@@ -146,7 +171,11 @@ def build_graph():
 
     # Memory Retriever
     # 复杂任务开始前先读取轻量记忆，后续 Planner/Evaluator 可以参考。
-    builder.add_edge("memory_retriever", "scheduler")
+    builder.add_edge("memory_retriever", "postgres_checkpoint")
+
+    # Postgres Checkpoint
+    # 真正 checkpoint 是 runtime 层；这个节点只把后端信息写进 State。
+    builder.add_edge("postgres_checkpoint", "scheduler")
 
     # 简单任务完成后进入简单汇总。
     builder.add_edge("search", "simple_summarize")
@@ -198,27 +227,36 @@ def build_graph():
         "tool_policy",
         route_after_policy,
         {
-            "approval": "human_approval",
-            "execute": "executor",
+            "approval": "approval_interrupt",
+            "execute": "sandbox_runner",
             "evaluate": "evaluator_verifier",
         },
     )
 
-    # Human Approval
+    # Approval Interrupt
     # 需要审批的工具调用在这里触发 LangGraph interrupt。
     # CLI / UI 收到审批请求后，用 Command(resume=...) 恢复图执行。
     builder.add_conditional_edges(
-        "human_approval",
-        route_after_human_approval,
+        "approval_interrupt",
+        route_after_approval_interrupt,
         {
-            "execute": "executor",
+            "execute": "sandbox_runner",
             "evaluate": "evaluator_verifier",
         },
     )
 
+    # Sandbox Runner
+    # Executor 前的受控运行边界。
+    # 当前是本地受控工具层，后续可替换成远程 sandbox。
+    builder.add_edge("sandbox_runner", "executor")
+
     # Executor
     # 真正执行工具。写工具执行前后会记录 patch_history，供 rollback 使用。
-    builder.add_edge("executor", "execution_monitor")
+    builder.add_edge("executor", "async_job_waiter")
+
+    # Async Job Waiter
+    # 当前同步工具不需要等待；后续接远程 worker 时在这里等待 job 完成。
+    builder.add_edge("async_job_waiter", "execution_monitor")
 
     # Execution Monitor / Watchdog
     # 先判断执行是否超预算、失败、空结果或部分结果。
@@ -259,7 +297,7 @@ def build_graph():
         route_after_task_committer,
         {
             "memory": "memory_writer",
-            "finish": "code_agent_summarize",
+            "finish": "artifact_collector",
         },
     )
 
@@ -268,6 +306,23 @@ def build_graph():
     builder.add_conditional_edges(
         "memory_writer",
         route_after_memory_writer,
+        {
+            "schedule": "artifact_collector",
+            "finish": "artifact_collector",
+        },
+    )
+
+    # Artifact Collector
+    # 每轮任务提交和记忆写入后，
+    # 收集改动文件、patch、验证任务等交付物索引。
+    builder.add_edge("artifact_collector", "observability_reporter")
+
+    # Observability Reporter
+    # 每轮 loop 后生成可观测性报告，
+    # 然后决定回 Scheduler 还是进入最终汇总。
+    builder.add_conditional_edges(
+        "observability_reporter",
+        route_after_observability_reporter,
         {
             "schedule": "scheduler",
             "finish": "code_agent_summarize",

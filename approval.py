@@ -31,31 +31,39 @@ def _resume_is_approved(resume_value: Any, task_id: str) -> tuple[bool, str]:
     """解析 CLI / UI 恢复 graph 时传回来的审批结果。"""
 
     if isinstance(resume_value, bool):
-        return resume_value, "Human Approval：收到布尔审批结果。"
+        return resume_value, "Approval Interrupt：收到布尔审批结果。"
     if isinstance(resume_value, dict):
         approved = bool(resume_value.get("approved", False))
         returned_task_id = str(resume_value.get("task_id", task_id))
         if returned_task_id and returned_task_id != task_id:
-            return False, f"Human Approval：审批任务不匹配，期望 {task_id}，实际 {returned_task_id}。"
-        reason = str(resume_value.get("reason", "Human Approval：收到结构化审批结果。"))
+            return (
+                False,
+                (
+                    "Approval Interrupt：审批任务不匹配，"
+                    f"期望 {task_id}，实际 {returned_task_id}。"
+                ),
+            )
+        reason = str(
+            resume_value.get("reason", "Approval Interrupt：收到结构化审批结果。")
+        )
         return approved, reason
-    return False, f"Human Approval：无法识别审批结果：{resume_value!r}。"
+    return False, f"Approval Interrupt：无法识别审批结果：{resume_value!r}。"
 
 
-def human_approval_node(state: State) -> dict[str, object]:
-    """Human Approval：处理 Tool Policy 要求人工确认的工具调用。
+def approval_interrupt_node(state: State) -> dict[str, object]:
+    """Approval Interrupt：处理 Tool Policy 要求人工确认的工具调用。
 
     中文注释：
     Tool Policy 只负责判断是否需要审批。
-    Human Approval 节点负责真正检查审批结果。
+    Approval Interrupt 节点负责真正暂停图、等待审批、恢复执行。
 
     当前版本已经接入 LangGraph interrupt：
 
-        human_approval_node
+        approval_interrupt_node
           -> interrupt(payload)
           -> CLI 展示审批请求
           -> Command(resume={"approved": True/False})
-          -> human_approval_node 从头恢复执行
+          -> approval_interrupt_node 从头恢复执行
 
     这样图不需要知道 CLI 怎么问用户，
     CLI 也不需要知道审批节点内部怎么更新 State。
@@ -70,7 +78,7 @@ def human_approval_node(state: State) -> dict[str, object]:
         resume_value = interrupt(_approval_payload(state))
         approved, approval_reason = _resume_is_approved(resume_value, task_id)
     else:
-        approval_reason = "Human Approval：用户已经提前批准该工具调用。"
+        approval_reason = "Approval Interrupt：用户已经提前批准该工具调用。"
 
     if approved:
         approvals = dict(state["human_approvals"])
@@ -87,7 +95,10 @@ def human_approval_node(state: State) -> dict[str, object]:
             "messages": [
                 {
                     "role": "assistant",
-                    "content": f"Human Approval：任务 {task_id} 已批准，进入 Executor。",
+                    "content": (
+                        f"Approval Interrupt：任务 {task_id} 已批准，"
+                        "进入 Sandbox Runner。"
+                    ),
                 }
             ],
         }
@@ -107,14 +118,17 @@ def human_approval_node(state: State) -> dict[str, object]:
         "messages": [
             {
                 "role": "assistant",
-                "content": f"Human Approval：任务 {task_id} 未获批准，进入 Evaluator。",
+                "content": (
+                    f"Approval Interrupt：任务 {task_id} 未获批准，"
+                    "进入 Evaluator。"
+                ),
             }
         ],
     }
 
 
-def route_after_human_approval(state: State) -> ApprovalRoute:
-    """Human Approval 后的路由。"""
+def route_after_approval_interrupt(state: State) -> ApprovalRoute:
+    """Approval Interrupt 后的路由。"""
 
     if state["next_action"] == "execute":
         return "execute"
