@@ -17,10 +17,6 @@ def main() -> None:
     """验证 LangGraph Postgres checkpoint 是否可初始化。"""
 
     os.environ.setdefault("BEGINNER_AGENT_CHECKPOINT_BACKEND", "postgres")
-    os.environ.setdefault(
-        "DATABASE_URL",
-        "postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent",
-    )
     checkpointer = build_checkpointer()
     backend = checkpoint_backend_name()
     print("Postgres checkpoint check passed.")

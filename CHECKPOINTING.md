@@ -55,7 +55,21 @@ build_checkpointer()
 
 ## 3. 环境变量
 
-默认本地 Postgres：
+生产级原则：
+
+```text
+数据库连接串必须来自环境变量，不能写死在源码里。
+```
+
+原因是：
+
+```text
+本地、测试、生产环境的数据库地址通常不同
+数据库账号和密码不应该提交进 Git
+缺配置时应该明确报错，而不是静默连接某个默认数据库
+```
+
+本地 Docker Postgres 可以这样配置：
 
 ```text
 DATABASE_URL=postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent
@@ -76,6 +90,9 @@ BEGINNER_AGENT_CHECKPOINT_DATABASE_URL=postgresql://...
 
 如果没有设置 `BEGINNER_AGENT_CHECKPOINT_DATABASE_URL`，
 系统会复用 `DATABASE_URL`。
+
+如果两个都没有设置，`checkpointing.py` 会直接报错。
+这比源码里内置默认数据库地址更符合生产级配置管理方式。
 
 ## 4. 启动本地 Postgres
 

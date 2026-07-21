@@ -6,9 +6,6 @@ from typing import Any
 from langgraph.checkpoint.memory import MemorySaver
 
 
-DEFAULT_DATABASE_URL = "postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent"
-
-
 def checkpoint_backend_name() -> str:
     """读取当前 checkpoint backend。
 
@@ -32,13 +29,31 @@ def checkpoint_backend_name() -> str:
 
 
 def _postgres_database_url() -> str:
-    """返回 checkpoint 使用的 Postgres 连接串。"""
+    """返回 checkpoint 使用的 Postgres 连接串。
 
-    return (
+    中文注释：
+    生产级代码不应该在源码里写死数据库账号、密码、主机和端口。
+
+    原因很简单：
+    - 本地、测试、生产环境的数据库地址通常不同。
+    - 数据库密码属于敏感配置，不应该进入 Git。
+    - 如果缺少配置，应该明确报错，而不是悄悄连接某个默认数据库。
+
+    所以这里只读取环境变量：
+    - BEGINNER_AGENT_CHECKPOINT_DATABASE_URL：checkpoint 专用数据库。
+    - DATABASE_URL：项目通用数据库。
+    """
+
+    database_url = (
         os.getenv("BEGINNER_AGENT_CHECKPOINT_DATABASE_URL", "").strip()
         or os.getenv("DATABASE_URL", "").strip()
-        or DEFAULT_DATABASE_URL
     )
+    if not database_url:
+        raise RuntimeError(
+            "Postgres checkpoint 需要配置数据库连接串。"
+            "请设置 BEGINNER_AGENT_CHECKPOINT_DATABASE_URL 或 DATABASE_URL。"
+        )
+    return database_url
 
 
 def _postgres_checkpointer() -> Any:
