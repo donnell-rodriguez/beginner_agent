@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 from .embeddings import safe_embedding, vector_to_sql
+from .memory_migrations import pending_memory_migrations, run_memory_migrations
 from .memory_models import MemoryAuditEvent, MemoryRecord, ValidityStatus
 from .memory_settings import MAX_INDEXED_VECTOR_DIMENSION, MAX_MEMORY_TEXT_CHARS
 
@@ -137,245 +139,41 @@ class PostgresMemoryStore:
         return psycopg.connect(self.database_url)
 
     def _ensure_table(self) -> None:
-        # 中文注释：
-        # 这里会自动初始化数据库结构。
-        #
-        # CREATE EXTENSION vector：
-        #   开启 pgvector 扩展，让 Postgres 支持 vector 类型。
-        #
-        # beginner_agent_memory：
-        #   保存结构化记忆。
-        #
-        # beginner_agent_memory_embeddings_<dimension>：
-        #   保存 embedding 向量。
-        #   这类表由 _ensure_embedding_table(...) 按需创建。
-        #
-        # CREATE INDEX：
-        #   给常见查询加索引，让检索更快。
-        with self._connect() as conn:
-            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS beginner_agent_memory (
-                    id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    tool_name TEXT NOT NULL,
-                    tool_result_status TEXT NOT NULL,
-                    paths JSONB NOT NULL,
-                    tags JSONB NOT NULL,
-                    confidence DOUBLE PRECISION NOT NULL,
-                    importance DOUBLE PRECISION NOT NULL DEFAULT 0.5,
-                    quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
-                    trust_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
-                    decay_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-                    scope TEXT NOT NULL DEFAULT 'project',
-                    visibility TEXT NOT NULL DEFAULT 'project',
-                    sensitivity_level TEXT NOT NULL DEFAULT 'internal',
-                    tenant_id TEXT NOT NULL DEFAULT 'local-tenant',
-                    workspace_id TEXT NOT NULL DEFAULT 'local-workspace',
-                    project_id TEXT NOT NULL DEFAULT 'beginner_agent',
-                    user_id TEXT NOT NULL DEFAULT 'local-user',
-                    retention_policy TEXT NOT NULL DEFAULT 'ttl',
-                    validity_status TEXT NOT NULL DEFAULT 'active',
-                    pinned BOOLEAN NOT NULL DEFAULT FALSE,
-                    expires_at TIMESTAMPTZ,
-                    supersedes TEXT,
-                    contradiction_key TEXT,
-                    source TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    metadata JSONB NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS beginner_agent_memory_audit (
-                    id TEXT PRIMARY KEY,
-                    action TEXT NOT NULL,
-                    memory_id TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    backend TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL,
-                    metadata JSONB NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS importance DOUBLE PRECISION NOT NULL DEFAULT 0.5
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS trust_score DOUBLE PRECISION NOT NULL DEFAULT 0.5
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS decay_score DOUBLE PRECISION NOT NULL DEFAULT 0.0
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'project'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'project'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS sensitivity_level TEXT NOT NULL DEFAULT 'internal'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'local-tenant'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'local-workspace'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT 'beginner_agent'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'local-user'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS retention_policy TEXT NOT NULL DEFAULT 'ttl'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS validity_status TEXT NOT NULL DEFAULT 'active'
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS supersedes TEXT
-                """
-            )
-            conn.execute(
-                """
-                ALTER TABLE beginner_agent_memory
-                ADD COLUMN IF NOT EXISTS contradiction_key TEXT
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_kind
-                ON beginner_agent_memory (kind)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_task_id
-                ON beginner_agent_memory (task_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tool_status
-                ON beginner_agent_memory (tool_name, tool_result_status)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_created_at
-                ON beginner_agent_memory (created_at DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_governance
-                ON beginner_agent_memory (
-                    validity_status, retention_policy, scope, pinned,
-                    expires_at, quality_score, trust_score
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_acl
-                ON beginner_agent_memory (
-                    tenant_id, workspace_id, project_id, user_id,
-                    visibility, sensitivity_level
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tags
-                ON beginner_agent_memory USING GIN (tags)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_audit_memory_id
-                ON beginner_agent_memory_audit (memory_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_audit_created_at
-                ON beginner_agent_memory_audit (created_at DESC)
-                """
-            )
-            conn.execute(
-                """
-                DELETE FROM beginner_agent_memory
-                WHERE expires_at IS NOT NULL
-                  AND expires_at <= NOW()
-                  AND pinned = FALSE
-                """
-            )
-            conn.execute(
-                "DROP INDEX IF EXISTS idx_beginner_agent_memory_embeddings_vector"
+        """确保 Postgres memory schema 已经迁移到最新版本。
+
+        中文注释：
+        这里不再手写 CREATE TABLE / ALTER TABLE。
+        schema 变更统一放到 memory_migrations.py：
+        - 有版本号。
+        - 有 up/down。
+        - 有 checksum。
+        - 有 backfill job。
+
+        这样 PostgresMemoryStore 只负责读写数据，不负责设计数据库历史。
+
+        生产级提醒：
+        - 本地开发可以自动 upgrade，体验更顺。
+        - 线上服务通常会关闭自动 upgrade，改由发布流水线执行 migration。
+        - 如果关闭后还有 pending migration，这里会直接报错，避免业务进程偷偷改表。
+        """
+
+        auto_upgrade = (
+            os.getenv("BEGINNER_AGENT_MEMORY_MIGRATION_AUTO_UPGRADE", "true")
+            .strip()
+            .lower()
+        )
+        if auto_upgrade in {"1", "true", "yes", "on"}:
+            run_memory_migrations(self.database_url)
+            return
+
+        pending = pending_memory_migrations(self.database_url)
+        if pending:
+            versions = ", ".join(str(item["version"]) for item in pending)
+            raise RuntimeError(
+                "Postgres memory schema has pending migrations. "
+                f"versions={versions}. "
+                "请先运行 scripts/manage_memory_migrations.py upgrade，"
+                "或在本地开发时设置 BEGINNER_AGENT_MEMORY_MIGRATION_AUTO_UPGRADE=true。"
             )
 
     def _ensure_embedding_table(self, dimension: int) -> str:
