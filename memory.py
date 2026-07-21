@@ -11,11 +11,21 @@ from __future__ import annotations
 # - memory_policy.py：写入策略、TTL、ACL、隐私字段治理。
 # - memory_audit.py：审计事件构造。
 # - memory_nodes.py：LangGraph 节点。
+# - memory_feedback.py：人工/系统反馈闭环。
+# - memory_eval_cases.py：离线 retrieval eval case。
+# - memory_rerank_observability.py：rerank telemetry / A/B bucket。
 #
 # 这样外部旧代码仍然可以 from beginner_agent.memory import MemoryRecord，
 # 但 memory.py 不再承担所有实现细节。
 
 from .memory_audit import _build_audit_event
+from .memory_eval_cases import MemoryEvalCase, append_memory_eval_case, read_memory_eval_cases
+from .memory_feedback import (
+    MemoryFeedbackEvent,
+    append_memory_feedback,
+    feedback_summary_for_memory,
+    read_memory_feedback,
+)
 from .memory_jsonl_store import (
     JsonlMemoryStore,
     _read_jsonl_audit_events,
@@ -52,15 +62,26 @@ from .memory_settings import (
     DEFAULT_WORKSPACE_ID,
     MAX_INDEXED_VECTOR_DIMENSION,
     MAX_MEMORY_AUDIT_EVENTS,
+    MAX_MEMORY_EVAL_CASES,
+    MAX_MEMORY_FEEDBACK_EVENTS,
     MAX_MEMORY_RECORDS,
+    MAX_MEMORY_RERANK_TELEMETRY_EVENTS,
     MAX_MEMORY_TEXT_CHARS,
     MAX_RERANK_CANDIDATES,
     MAX_RETRIEVED_RECORDS,
     MEMORY_AUDIT_FILE,
     MEMORY_DIR,
+    MEMORY_EVAL_CASES_FILE,
+    MEMORY_FEEDBACK_FILE,
     MEMORY_FILE,
+    MEMORY_RERANK_TELEMETRY_FILE,
     MEMORY_PROMOTION_SUCCESS_THRESHOLD,
     MIN_RERANK_SCORE,
+)
+from .memory_rerank_observability import (
+    read_rerank_telemetry,
+    rerank_ab_bucket,
+    summarize_rerank_telemetry,
 )
 from .memory_store import (
     MemoryStore,
@@ -79,17 +100,25 @@ __all__ = [
     "JsonlMemoryStore",
     "MAX_INDEXED_VECTOR_DIMENSION",
     "MAX_MEMORY_AUDIT_EVENTS",
+    "MAX_MEMORY_EVAL_CASES",
+    "MAX_MEMORY_FEEDBACK_EVENTS",
     "MAX_MEMORY_RECORDS",
+    "MAX_MEMORY_RERANK_TELEMETRY_EVENTS",
     "MAX_MEMORY_TEXT_CHARS",
     "MAX_RERANK_CANDIDATES",
     "MAX_RETRIEVED_RECORDS",
     "MEMORY_AUDIT_FILE",
     "MEMORY_DIR",
+    "MEMORY_EVAL_CASES_FILE",
+    "MEMORY_FEEDBACK_FILE",
     "MEMORY_FILE",
+    "MEMORY_RERANK_TELEMETRY_FILE",
     "MEMORY_PROMOTION_SUCCESS_THRESHOLD",
     "MIN_RERANK_SCORE",
     "MemoryAuditAction",
     "MemoryAuditEvent",
+    "MemoryEvalCase",
+    "MemoryFeedbackEvent",
     "MemoryKind",
     "MemoryPolicyAction",
     "MemoryPolicyDecision",
@@ -111,8 +140,16 @@ __all__ = [
     "_stable_memory_id",
     "_upsert_memory_audit_event",
     "_upsert_memory_record",
+    "append_memory_eval_case",
+    "append_memory_feedback",
+    "feedback_summary_for_memory",
     "memory_record_json_schema",
     "memory_retriever_node",
     "memory_writer_node",
+    "read_memory_eval_cases",
+    "read_memory_feedback",
+    "read_rerank_telemetry",
+    "rerank_ab_bucket",
     "route_after_memory_writer",
+    "summarize_rerank_telemetry",
 ]

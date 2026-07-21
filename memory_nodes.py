@@ -103,12 +103,18 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "path_overlap",
                 "misleading_risk",
                 "failure_memory_signal",
+                "optional_cross_encoder",
+                "ab_bucket",
+                "rerank_telemetry",
             ],
             "quality_evaluation": [
                 "MemoryEvaluator",
                 "MemoryQualityScore",
                 "MemoryDecay",
                 "MemoryTrustScore",
+                "feedback_signal",
+                "optional_llm_judge",
+                "offline_eval_cases",
             ],
             "failure_memory_library": [
                 "failure_category",

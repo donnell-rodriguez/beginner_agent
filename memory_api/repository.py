@@ -5,8 +5,14 @@ import os
 from typing import Any
 
 from beginner_agent.memory_audit import _build_audit_event
+from beginner_agent.memory_eval_cases import read_memory_eval_cases
+from beginner_agent.memory_feedback import feedback_summary_for_memory, read_memory_feedback
 from beginner_agent.memory_jsonl_store import JsonlMemoryStore, _read_jsonl_audit_events
 from beginner_agent.memory_postgres_store import PostgresMemoryStore
+from beginner_agent.memory_rerank_observability import (
+    read_rerank_telemetry,
+    summarize_rerank_telemetry,
+)
 from beginner_agent.memory_settings import MAX_MEMORY_AUDIT_EVENTS, MAX_MEMORY_RECORDS
 from beginner_agent.memory_store import _configured_store, _upsert_memory_audit_event
 from beginner_agent.run_lineage import lineage_for_run_id
@@ -300,6 +306,46 @@ class MemoryQueryRepository:
             backend,
             error,
         )
+
+    def feedback(
+        self,
+        memory_id: str | None,
+        *,
+        limit: int,
+    ) -> tuple[dict[str, Any], str, str]:
+        """查询人工/系统反馈。
+
+        中文注释：
+        feedback 是 memory 质量闭环的一部分。
+        它回答“这条记忆后来是否被证明有用/有害”。
+        """
+
+        events = read_memory_feedback(limit)
+        if memory_id:
+            events = [
+                event
+                for event in events
+                if str(event.get("memory_id", "")) == memory_id
+            ]
+        summary = feedback_summary_for_memory(memory_id) if memory_id else {}
+        return {
+            "memory_id": memory_id or "",
+            "summary": summary,
+            "events": events[:limit],
+        }, "jsonl-feedback", ""
+
+    def eval_cases(self, *, limit: int) -> tuple[list[dict[str, Any]], str, str]:
+        """查询离线 memory eval cases。"""
+
+        return read_memory_eval_cases(limit), "jsonl-eval-cases", ""
+
+    def rerank_telemetry(self, *, limit: int) -> tuple[dict[str, Any], str, str]:
+        """查询 rerank telemetry 和 A/B bucket 统计。"""
+
+        return {
+            "summary": summarize_rerank_telemetry(limit),
+            "events": read_rerank_telemetry(limit),
+        }, "jsonl-rerank-telemetry", ""
 
     def contradiction_evolution(
         self,

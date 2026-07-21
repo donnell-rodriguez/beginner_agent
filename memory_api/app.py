@@ -99,6 +99,33 @@ def create_app() -> FastAPI:
         )
         return _response(data, backend, error)
 
+    @app.get("/memories/{memory_id}/feedback", response_model=MemoryApiResponse)
+    def memory_feedback(
+        memory_id: str,
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> MemoryApiResponse:
+        data, backend, error = repository.feedback(memory_id, limit=limit)
+        return _response(data, backend, error)
+
+    @app.get("/feedback", response_model=MemoryApiResponse)
+    def all_feedback(
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> MemoryApiResponse:
+        data, backend, error = repository.feedback(None, limit=limit)
+        return _response(data, backend, error)
+
+    @app.get("/eval-cases", response_model=MemoryApiResponse)
+    def eval_cases(limit: int = Query(default=100, ge=1, le=1000)) -> MemoryApiResponse:
+        data, backend, error = repository.eval_cases(limit=limit)
+        return _response(data, backend, error)
+
+    @app.get("/rerank/telemetry", response_model=MemoryApiResponse)
+    def rerank_telemetry(
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> MemoryApiResponse:
+        data, backend, error = repository.rerank_telemetry(limit=limit)
+        return _response(data, backend, error)
+
     @app.get("/audit", response_model=MemoryApiResponse)
     def audit(
         limit: int = Query(default=100, ge=1, le=1000),

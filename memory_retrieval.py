@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .failure_memory import failure_rerank_signal
 from .memory_audit import _build_audit_event
+from .memory_eval_cases import evaluate_retrieval_case, read_memory_eval_cases
 from .memory_jsonl_store import JsonlMemoryStore
+from .memory_judge import cross_encoder_rerank_score
 from .memory_models import MemoryRecord
 from .memory_policy import (
     _dedupe_contradiction_records,
@@ -22,6 +25,7 @@ from .memory_policy import (
 )
 from .memory_settings import MAX_MEMORY_RECORDS, MAX_RERANK_CANDIDATES, MAX_RETRIEVED_RECORDS, MIN_RERANK_SCORE
 from .memory_store import _configured_store, _upsert_memory_audit_event, _upsert_memory_record
+from .memory_rerank_observability import append_rerank_telemetry, rerank_ab_bucket
 from .preference_memory import default_preference_payloads, preference_rerank_signal
 from .privacy_governance import memory_prompt_allowed_by_privacy
 from .state import State
@@ -170,7 +174,7 @@ def _score_record(record: dict[str, Any], state: State) -> int:
     它和 pgvector 语义检索一起工作：
     - 规则分数适合处理路径、工具名、状态、关键词。
     - 向量检索适合处理“意思相近但词不一样”的经验。
-    - 后续 TODO 里的 reranker 可以在两者之后做最终排序。
+    - reranker 会在召回后做最终排序，并记录 telemetry。
     """
 
     query = state["user_input"].lower()
@@ -366,10 +370,12 @@ def _rerank_memory_candidates(
     - 是否应该进入 memory_context？
 
     当前实现是稳定的本地特征 reranker。
-    后续可以把它替换成 cross-encoder / LLM judge。
+    如果配置了 cross-encoder endpoint，candidate bucket 会把它作为第二阶段分数。
     """
 
-    query_tokens = _tokenize_for_rerank(_rerank_query_text(state))
+    query_text = _rerank_query_text(state)
+    query_tokens = _tokenize_for_rerank(query_text)
+    ab_bucket = rerank_ab_bucket(state.get("run_id", ""), state.get("user_input", ""))
     reranked: list[dict[str, Any]] = []
     for record in records[:MAX_RERANK_CANDIDATES]:
         record_tokens = _tokenize_for_rerank(_record_rerank_text(record))
@@ -387,9 +393,15 @@ def _rerank_memory_candidates(
         failure_weight = float(failure_signal.get("failure_weight", 0.0))
         preference_signal = preference_rerank_signal(record)
         preference_weight = float(preference_signal.get("preference_weight", 0.0))
+        cross_encoder = cross_encoder_rerank_score(query_text, record).as_dict()
+        cross_encoder_score = (
+            float(cross_encoder.get("score", 0.0))
+            if cross_encoder.get("enabled") and not cross_encoder.get("error")
+            else 0.0
+        )
         pinned = 1.0 if record.get("pinned") else 0.0
 
-        score = (
+        local_score = (
             semantic * 0.28
             + normalized_rule * 0.20
             + token_overlap * 0.18
@@ -401,6 +413,10 @@ def _rerank_memory_candidates(
             + pinned * 0.08
             - risk * 0.20
         )
+        if ab_bucket == "candidate" and cross_encoder_score:
+            score = (local_score * 0.72) + (cross_encoder_score * 0.28)
+        else:
+            score = local_score
         score = max(0.0, min(1.0, score))
         decision = "include" if score >= MIN_RERANK_SCORE or record.get("pinned") else "drop"
         reranked.append(
@@ -410,9 +426,10 @@ def _rerank_memory_candidates(
                 "rerank_decision": decision,
                 "rerank_reason": (
                     "task-aware reranker: semantic/rule/token/reliability/"
-                    "recency/path/risk weighted score"
+                    "recency/path/risk weighted score; optional cross-encoder"
                 ),
                 "rerank_features": {
+                    "ab_bucket": ab_bucket,
                     "semantic": round(semantic, 4),
                     "rule": round(normalized_rule, 4),
                     "token_overlap": round(token_overlap, 4),
@@ -434,6 +451,7 @@ def _rerank_memory_candidates(
                     "misleading_risk": round(risk, 4),
                     "failure_memory": failure_signal,
                     "preference_memory": preference_signal,
+                    "cross_encoder": cross_encoder,
                     "pinned": bool(record.get("pinned")),
                 },
             }
@@ -441,6 +459,46 @@ def _rerank_memory_candidates(
     included = [record for record in reranked if record["rerank_decision"] == "include"]
     included.sort(key=lambda record: float(record.get("rerank_score", 0)), reverse=True)
     return included[:MAX_RETRIEVED_RECORDS]
+
+
+def _record_rerank_telemetry(
+    *,
+    state: State,
+    candidates: list[dict[str, Any]],
+    reranked: list[dict[str, Any]],
+    returned: list[dict[str, Any]],
+    backend: str,
+    backend_error: str,
+) -> None:
+    """记录 rerank telemetry，服务命中率、误召回和 A/B 分析。"""
+
+    returned_ids = [str(record.get("id", "")) for record in returned]
+    included_ids = [str(record.get("id", "")) for record in reranked]
+    candidate_ids = [str(record.get("id", "")) for record in candidates]
+    eval_cases = read_memory_eval_cases(20)
+    eval_matches = [
+        evaluate_retrieval_case(case, returned)
+        for case in eval_cases
+        if str(case.get("query", "")).strip()
+        and str(case.get("query", "")).lower() in str(state.get("user_input", "")).lower()
+    ]
+    append_rerank_telemetry(
+        {
+            "run_id": state.get("run_id", ""),
+            "task_id": state.get("current_task_id", ""),
+            "ab_bucket": rerank_ab_bucket(state.get("run_id", ""), state.get("user_input", "")),
+            "backend": backend,
+            "backend_error": backend_error,
+            "candidate_count": len(candidates),
+            "included_count": len(included_ids),
+            "returned_count": len(returned_ids),
+            "dropped_count": max(0, len(candidate_ids) - len(included_ids)),
+            "candidate_ids": candidate_ids[:24],
+            "included_ids": included_ids[:12],
+            "returned_ids": returned_ids[:12],
+            "eval_matches": eval_matches[:5],
+        }
+    )
 
 
 def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str, str]:
@@ -516,4 +574,12 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
         backend = f"{backend}+vector"
     elif vector_error:
         backend = f"{backend}; vector_backend={vector_backend}"
+    _record_rerank_telemetry(
+        state=state,
+        candidates=candidates,
+        reranked=reranked,
+        returned=results,
+        backend=backend,
+        backend_error=errors,
+    )
     return results, backend, errors

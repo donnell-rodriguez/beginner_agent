@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from .memory_feedback import feedback_summary_for_memory
+from .memory_judge import llm_judge_memory_quality
+
 
 MemoryQualityDecision = Literal["store", "deprioritize", "reject"]
 
@@ -129,12 +132,16 @@ class MemoryEvaluation:
     quality: MemoryQualityScore
     decay: MemoryDecay
     trust: MemoryTrustScore
+    feedback: dict[str, Any]
+    llm_judge: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "quality": self.quality.as_dict(),
             "decay": self.decay.as_dict(),
             "trust": self.trust.as_dict(),
+            "feedback": self.feedback,
+            "llm_judge": self.llm_judge,
         }
 
 
@@ -353,6 +360,14 @@ def evaluate_memory_trust(record: dict[str, Any]) -> MemoryTrustScore:
         score -= 0.05
         penalties.append("sensitive_memory")
 
+    feedback = feedback_summary_for_memory(str(record.get("id", "")))
+    if feedback["positive"]:
+        score += min(0.18, feedback["positive"] * 0.06)
+        signals.append("positive_feedback")
+    if feedback["negative"]:
+        score -= min(0.25, feedback["negative"] * 0.08)
+        penalties.append("negative_feedback")
+
     return MemoryTrustScore(_clamp(score), tuple(signals), tuple(penalties))
 
 
@@ -432,8 +447,11 @@ class MemoryEvaluator:
     """MemoryEvaluator：写入前的记忆质量评估器。
 
     中文注释：
-    这不是 LLM 评审，而是本地、可重复、可审计的第一层质量门禁。
-    后续如果要接 cross-encoder / LLM judge，可以在这个类后面加第二阶段。
+    第一层是本地、可重复、可审计的规则评分。
+    第二层可以接 LLM judge。
+    第三层会读取人工/系统 feedback。
+
+    这样默认离线可运行，但打开配置后可以逐步接近生产级评估链路。
     """
 
     def evaluate(
@@ -446,7 +464,15 @@ class MemoryEvaluator:
         quality = evaluate_memory_quality(record, existing_records)
         decay = evaluate_memory_decay(record)
         trust = evaluate_memory_trust(record)
-        return MemoryEvaluation(quality=quality, decay=decay, trust=trust)
+        feedback = feedback_summary_for_memory(str(record.get("id", "")))
+        llm_judge = llm_judge_memory_quality(record).as_dict()
+        return MemoryEvaluation(
+            quality=quality,
+            decay=decay,
+            trust=trust,
+            feedback=feedback,
+            llm_judge=llm_judge,
+        )
 
 
 def adjusted_memory_fields(
@@ -466,6 +492,22 @@ def adjusted_memory_fields(
         + (quality.overall * 0.30)
         + ((1.0 - decay.decay_score) * 0.15)
     )
+    feedback = evaluation.feedback
+    if feedback.get("positive"):
+        confidence = _clamp(confidence + min(0.12, float(feedback["positive"]) * 0.04))
+        importance = _clamp(importance + min(0.12, float(feedback["positive"]) * 0.04))
+    if feedback.get("negative"):
+        confidence = _clamp(confidence - min(0.18, float(feedback["negative"]) * 0.06))
+        importance = _clamp(importance - min(0.18, float(feedback["negative"]) * 0.06))
+    llm_judge = evaluation.llm_judge
+    if llm_judge.get("enabled") and not llm_judge.get("error"):
+        judge_score = float(llm_judge.get("score", 0.5))
+        confidence = _clamp((confidence * 0.75) + (judge_score * 0.25))
+        if llm_judge.get("decision") == "reject":
+            confidence = min(confidence, 0.35)
+            importance = min(importance, 0.25)
+        elif llm_judge.get("decision") == "deprioritize":
+            importance = min(importance, 0.45)
     updates: dict[str, Any] = {
         "quality_score": quality.overall,
         "trust_score": trust.trust_score,
