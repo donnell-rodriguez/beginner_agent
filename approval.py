@@ -10,6 +10,12 @@ from .state import State
 ApprovalRoute = Literal["execute", "evaluate"]
 
 
+def _empty_resume_result(reason: str) -> tuple[bool, str, dict[str, Any], str]:
+    """构造统一的审批恢复结果。"""
+
+    return False, reason, {}, ""
+
+
 def _approval_payload(state: State) -> dict[str, Any]:
     """构造要展示给人类的审批信息。"""
 
@@ -27,17 +33,25 @@ def _approval_payload(state: State) -> dict[str, Any]:
     }
 
 
-def _resume_is_approved(resume_value: Any, task_id: str) -> tuple[bool, str]:
-    """解析 CLI / UI 恢复 graph 时传回来的审批结果。"""
+def _resume_is_approved(resume_value: Any, task_id: str) -> tuple[bool, str, dict[str, Any], str]:
+    """解析 CLI / UI 恢复 graph 时传回来的审批结果。
+
+    中文注释：
+    恢复值不只包含 approved。
+    它还可以包含：
+    - approver_id：谁审批的。
+    - modified_tool_args：审批人修改后的工具参数。
+
+    这样就支持“批准，但把参数改安全一点再执行”。
+    """
 
     if isinstance(resume_value, bool):
-        return resume_value, "Approval Interrupt：收到布尔审批结果。"
+        return resume_value, "Approval Interrupt：收到布尔审批结果。", {}, ""
     if isinstance(resume_value, dict):
         approved = bool(resume_value.get("approved", False))
         returned_task_id = str(resume_value.get("task_id", task_id))
         if returned_task_id and returned_task_id != task_id:
-            return (
-                False,
+            return _empty_resume_result(
                 (
                     "Approval Interrupt：审批任务不匹配，"
                     f"期望 {task_id}，实际 {returned_task_id}。"
@@ -46,8 +60,12 @@ def _resume_is_approved(resume_value: Any, task_id: str) -> tuple[bool, str]:
         reason = str(
             resume_value.get("reason", "Approval Interrupt：收到结构化审批结果。")
         )
-        return approved, reason
-    return False, f"Approval Interrupt：无法识别审批结果：{resume_value!r}。"
+        modified_tool_args = dict(resume_value.get("modified_tool_args") or {})
+        approver_id = str(resume_value.get("approver_id", ""))
+        return approved, reason, modified_tool_args, approver_id
+    return _empty_resume_result(
+        f"Approval Interrupt：无法识别审批结果：{resume_value!r}。"
+    )
 
 
 def approval_interrupt_node(state: State) -> dict[str, object]:
@@ -73,22 +91,36 @@ def approval_interrupt_node(state: State) -> dict[str, object]:
     task_id = state["current_task_id"]
     task = dict(task_tree.get(task_id, {}))
     approved = bool(state["human_approvals"].get(task_id, False))
+    modified_tool_args: dict[str, Any] = {}
+    approver_id = ""
 
     if not approved:
         resume_value = interrupt(_approval_payload(state))
-        approved, approval_reason = _resume_is_approved(resume_value, task_id)
+        approved, approval_reason, modified_tool_args, approver_id = _resume_is_approved(
+            resume_value,
+            task_id,
+        )
     else:
         approval_reason = "Approval Interrupt：用户已经提前批准该工具调用。"
 
     if approved:
         approvals = dict(state["human_approvals"])
         approvals[task_id] = True
+        tool_args = modified_tool_args or dict(state["tool_args"])
         task["status"] = "approved"
+        task["args"] = tool_args
+        task["approval"] = {
+            "approved": True,
+            "approver_id": approver_id,
+            "reason": approval_reason,
+            "modified_tool_args": modified_tool_args,
+        }
         task_tree[task_id] = task
         return {
             "task_tree": task_tree,
             "human_approvals": approvals,
             "pending_approval": {},
+            "tool_args": tool_args,
             "policy_decision": "allow",
             "policy_reason": approval_reason,
             "next_action": "execute",

@@ -13,6 +13,12 @@ if __package__ is None or __package__ == "":
 
 from langgraph.types import Command  # noqa: E402
 
+from beginner_agent.approval_server import run_approval_server  # noqa: E402
+from beginner_agent.approval_store import (  # noqa: E402
+    ApprovalStore,
+    default_approver_id,
+    default_timeout_seconds,
+)
 from beginner_agent.graph import build_graph  # noqa: E402
 from beginner_agent.serialization import serialize_for_json  # noqa: E402
 from beginner_agent.state_factory import create_initial_state  # noqa: E402
@@ -53,18 +59,46 @@ def _print_approval_request(payload: dict[str, Any]) -> None:
     print(json.dumps(payload.get("tool_args", {}), ensure_ascii=False, indent=2))
 
 
-def _ask_human(payload: dict[str, Any]) -> dict[str, Any]:
+def _read_modified_tool_args(payload: dict[str, Any]) -> dict[str, Any]:
+    """让审批人可选地修改工具参数。
+
+    中文注释：
+    生产级审批不是只有 approve / deny。
+    有时工具方向是对的，但参数需要收窄，比如：
+
+        {"path": "."} 改成 {"path": "graph.py"}
+
+    这里用 JSON 输入，保持 CLI 简单但能力完整。
+    """
+
+    answer = (
+        input("是否修改工具参数？输入 e 编辑，直接回车表示不修改：")
+        .strip()
+        .lower()
+    )
+    if answer != "e":
+        return {}
+
+    current_args = payload.get("tool_args", {})
+    print("\n当前工具参数：")
+    print(json.dumps(current_args, ensure_ascii=False, indent=2))
+    raw = input("\n请输入新的 JSON 工具参数：").strip()
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("新的工具参数必须是 JSON object。")
+    return parsed
+
+
+def _ask_human(payload: dict[str, Any], *, approver_id: str) -> dict[str, Any]:
     """CLI 人工审批入口。
 
     中文注释：
-    当前是最小可用 CLI：
+    当前是本地可用 CLI：
     - y / yes / approve：批准，图恢复后继续执行工具。
     - 其他输入：拒绝，图恢复后进入 Evaluator，任务会被标记 blocked。
-
-    后续可以把这里替换成：
-    - Web UI。
-    - Slack / 飞书审批。
-    - 更细粒度的“修改参数后批准”。
+    - 批准时可以修改 tool_args，然后再恢复 graph。
     """
 
     _print_approval_request(payload)
@@ -74,10 +108,13 @@ def _ask_human(payload: dict[str, Any]) -> dict[str, Any]:
         .lower()
     )
     approved = answer in {"y", "yes", "approve", "approved"}
+    modified_tool_args = _read_modified_tool_args(payload) if approved else {}
     return {
         "approved": approved,
         "approval_id": payload.get("approval_id", ""),
         "task_id": payload.get("task_id", ""),
+        "approver_id": approver_id,
+        "modified_tool_args": modified_tool_args,
         "reason": "CLI 用户批准。" if approved else "CLI 用户拒绝。",
     }
 
@@ -98,39 +135,181 @@ def _stream_until_interrupt_or_done(graph: Any, graph_input: Any, config: dict[s
     return {"interrupted": False, "result": graph.get_state(config).values}
 
 
-def run_cli(user_input: str, *, thread_id: str | None = None) -> Any:
+def _approval_resume_value(
+    payload: dict[str, Any],
+    *,
+    store: ApprovalStore,
+    thread_id: str,
+    approval_mode: str,
+    approver_id: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """保存审批请求，并返回 Command(resume=...) 所需的审批结果。"""
+
+    record = store.create_or_update_request(
+        payload,
+        thread_id=thread_id,
+        timeout_seconds=timeout_seconds,
+    )
+    payload = {**payload, "approval_id": record.approval_id}
+
+    if approval_mode == "api":
+        print("\n审批请求已经保存，等待 API / Web UI 写入审批结果。")
+        print(f"审批 id：{record.approval_id}")
+        print(f"超时时间：{timeout_seconds} 秒")
+        decided = store.wait_for_decision(
+            record.approval_id,
+            timeout_seconds=timeout_seconds,
+        )
+        return decided.to_resume_value()
+
+    decision = _ask_human(payload, approver_id=approver_id)
+    decided = store.decide(
+        record.approval_id,
+        approved=bool(decision["approved"]),
+        approver_id=approver_id,
+        reason=str(decision["reason"]),
+        modified_tool_args=dict(decision.get("modified_tool_args") or {}),
+    )
+    return decided.to_resume_value()
+
+
+def run_cli(
+    user_input: str,
+    *,
+    thread_id: str | None = None,
+    approval_mode: str = "cli",
+    approver_id: str | None = None,
+    timeout_seconds: int | None = None,
+) -> Any:
     """运行支持 Approval Interrupt 的 CLI。"""
 
     graph = build_graph()
-    config = {"configurable": {"thread_id": thread_id or f"beginner-agent-cli-{uuid.uuid4()}"}}
+    resolved_thread_id = thread_id or f"beginner-agent-cli-{uuid.uuid4()}"
+    config = {"configurable": {"thread_id": resolved_thread_id}}
     graph_input: Any = create_initial_state(user_input)
+    store = ApprovalStore()
+    resolved_approver = approver_id or default_approver_id()
+    resolved_timeout = timeout_seconds or default_timeout_seconds()
 
     while True:
         outcome = _stream_until_interrupt_or_done(graph, graph_input, config)
         if not outcome["interrupted"]:
             return outcome["result"]
 
-        approval_result = _ask_human(outcome["payload"])
+        approval_result = _approval_resume_value(
+            outcome["payload"],
+            store=store,
+            thread_id=resolved_thread_id,
+            approval_mode=approval_mode,
+            approver_id=resolved_approver,
+            timeout_seconds=resolved_timeout,
+        )
         graph_input = Command(resume=approval_result)
 
 
-def main() -> None:
-    """命令行入口。"""
+def _add_run_args(parser: argparse.ArgumentParser) -> None:
+    """添加运行 agent 所需参数。"""
 
-    parser = argparse.ArgumentParser(description="Run beginner_agent with CLI approval interrupt.")
     parser.add_argument(
         "user_input",
         nargs="*",
         help="用户任务。为空时进入交互输入。",
     )
     parser.add_argument("--thread-id", default=None, help="LangGraph checkpoint thread_id。")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--approval-mode",
+        choices=["cli", "api"],
+        default="cli",
+        help="cli 表示本地询问；api 表示等待审批 API 写入结果。",
+    )
+    parser.add_argument("--approver-id", default=None, help="审批人身份。")
+    parser.add_argument(
+        "--approval-timeout-seconds",
+        type=int,
+        default=None,
+        help="审批超时时间，超时后自动拒绝。",
+    )
+
+
+def _print_approval_records(records: list[Any]) -> None:
+    """打印审批列表。"""
+
+    print(
+        json.dumps(
+            [
+                {
+                    "approval_id": record.approval_id,
+                    "task_id": record.task_id,
+                    "status": record.status,
+                    "approver_id": record.approver_id,
+                    "expires_at": record.expires_at,
+                    "reason": record.reason,
+                }
+                for record in records
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def main() -> None:
+    """命令行入口。"""
+
+    parser = argparse.ArgumentParser(description="Run beginner_agent.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser("run", help="运行 agent。")
+    _add_run_args(run_parser)
+
+    serve_parser = subparsers.add_parser("serve-approvals", help="启动本地审批 API。")
+    serve_parser.add_argument("--host", default=None, help="审批 API host。")
+    serve_parser.add_argument("--port", type=int, default=None, help="审批 API port。")
+
+    list_parser = subparsers.add_parser("list-approvals", help="列出审批请求。")
+    list_parser.add_argument(
+        "--status",
+        default=None,
+        help="过滤 pending/approved/denied/expired。",
+    )
+    list_parser.add_argument("--limit", type=int, default=20, help="最多返回多少条。")
+
+    # 中文注释：
+    # 为了兼容旧用法：
+    #
+    #     python main.py "帮我看 graph.py"
+    #
+    # 如果第一个参数不是已知子命令，就当成 run 的 user_input。
+    known_commands = {"run", "serve-approvals", "list-approvals"}
+    if len(sys.argv) > 1 and sys.argv[1] not in known_commands:
+        args = parser.parse_args(["run", *sys.argv[1:]])
+    else:
+        args = parser.parse_args()
+
+    if args.command == "serve-approvals":
+        run_approval_server(host=args.host, port=args.port)
+        return
+
+    if args.command == "list-approvals":
+        _print_approval_records(ApprovalStore().list(status=args.status, limit=args.limit))
+        return
+
+    if args.command is None:
+        parser.print_help()
+        return
 
     user_input = " ".join(args.user_input).strip()
     if not user_input:
         user_input = input("请输入任务：").strip()
 
-    result = run_cli(user_input, thread_id=args.thread_id)
+    result = run_cli(
+        user_input,
+        thread_id=args.thread_id,
+        approval_mode=args.approval_mode,
+        approver_id=args.approver_id,
+        timeout_seconds=args.approval_timeout_seconds,
+    )
     print("\n最终输出：")
     print(json.dumps(serialize_for_json(result), ensure_ascii=False, indent=2))
 
