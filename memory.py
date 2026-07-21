@@ -21,16 +21,27 @@ MemoryScope = Literal["global", "user", "project", "thread", "task", "tool", "fi
 RetentionPolicy = Literal["none", "session", "ttl", "long_term", "pinned"]
 ValidityStatus = Literal["active", "superseded", "deprecated", "disputed", "rejected"]
 MemoryPolicyAction = Literal["store", "discard"]
+MemoryAuditAction = Literal[
+    "store",
+    "discard",
+    "supersede",
+    "promote",
+    "fallback",
+    "retrieve",
+]
 MemoryWriterRoute = Literal["schedule", "finish"]
 
 MEMORY_DIR = STATE_DIR / "memory"
 MEMORY_FILE = MEMORY_DIR / "memory.jsonl"
+MEMORY_AUDIT_FILE = MEMORY_DIR / "memory_audit.jsonl"
 MAX_MEMORY_RECORDS = 500
+MAX_MEMORY_AUDIT_EVENTS = 1000
 MAX_RETRIEVED_RECORDS = 8
 MAX_INDEXED_VECTOR_DIMENSION = 2000
 MAX_MEMORY_TEXT_CHARS = 2000
 DEFAULT_MEMORY_TTL_DAYS = 30
 DEFAULT_MEMORY_BACKEND = "postgres"
+MEMORY_PROMOTION_SUCCESS_THRESHOLD = 3
 SENSITIVE_FIELD_NAMES = {
     "api_key",
     "authorization",
@@ -99,14 +110,15 @@ SENSITIVE_FIELD_NAMES = {
 # - supersedes 修正关系字段。
 # - MemoryPolicy 写入前决定 store / discard。
 # - 敏感字段和长文本裁剪，避免把密钥或大段日志写进长期记忆。
-#
-# 后续 TODO：
 # - 自动把 supersedes 指向的旧记录标记为 superseded。
 # - 同 contradiction_key 只返回最新 active 记忆。
 # - 增加 MemoryPromotion，把多次成功/人工确认的记忆晋升为 pinned。
-# - 增加 MemoryReranker，用 reranker 或 LLM judge 做最终排序。
 # - 增加 MemoryAudit，记录哪条记忆影响了哪个 Planner/Evaluator 决策。
-# - 增加后台清理任务，定期删除 expires_at 已过期的非 pinned 记忆。
+# - 清理 expires_at 已过期的非 pinned 记忆。
+#
+# 后续 TODO：
+# - 增加 MemoryReranker，用 reranker 或 LLM judge 做最终排序。
+# - 把 MemoryAudit 接到独立查询 API / dashboard。
 
 
 def _validate_embedding_dimension(dimension: int) -> None:
@@ -165,7 +177,7 @@ class MemoryRecord(BaseModel):
     - 后续可以直接导出 JSON Schema。
     - 更接近生产级 agent 的 memory record 设计。
     """
-
+    # 不允许出现未定义字段。
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -188,7 +200,9 @@ class MemoryRecord(BaseModel):
     supersedes: str | None = None
     contradiction_key: str | None = None
     source: str = "memory_writer_node"
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("confidence", "importance")
@@ -201,6 +215,39 @@ class MemoryRecord(BaseModel):
         return value
 
 
+class MemoryAuditEvent(BaseModel):
+    """记忆治理审计事件。
+
+    中文注释：
+    生产级 memory 系统不能只保存“最后结果”，
+    还要保存“为什么这么做”。
+    例如：
+    - 为什么这条记忆被保存？
+    - 为什么这条记忆被丢弃？
+    - 哪条旧记忆被 superseded？
+    - 哪条记忆因为多次成功被 promotion？
+    - 检索时哪些记忆进入了上下文？
+
+    这类信息不直接参与 agent 推理，但对排查问题、复盘策略、
+    调整 memory policy 很重要。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    action: MemoryAuditAction
+    memory_id: str
+    reason: str
+    backend: str
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# frozen=True = 这个对象创建后就冻结，不允许再改字段
+# 这种结果最好是“确定后不再被随手改掉”。否则后面某个函数
+# 不小心把 action 从 "discard" 改成 "store"，memory 系统就会出现难查的 bug。
 @dataclass(frozen=True)
 class MemoryPolicyDecision:
     """MemoryPolicy 的判断结果。
@@ -223,6 +270,9 @@ class MemoryPolicyDecision:
     validity_status: ValidityStatus = "active"
 
 
+# Python Protocol ≈ Rust trait
+# 不要求显式继承 MemoryStore
+# 只要方法长得一样，就算符合
 class MemoryStore(Protocol):
     """Memory 存储适配器协议。
 
@@ -244,6 +294,9 @@ class MemoryStore(Protocol):
 
     def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
         """语义检索相似记忆。"""
+
+    def upsert_audit_event(self, event: MemoryAuditEvent) -> None:
+        """插入或更新一条记忆审计事件。"""
 
 
 class JsonlMemoryStore:
@@ -270,6 +323,9 @@ class JsonlMemoryStore:
 
     def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
         return []
+
+    def upsert_audit_event(self, event: MemoryAuditEvent) -> None:
+        _upsert_jsonl_audit_event(event.model_dump(mode="json"))
 
 
 class PostgresMemoryStore:
@@ -369,6 +425,19 @@ class PostgresMemoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS beginner_agent_memory_audit (
+                    id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    backend TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    metadata JSONB NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 ALTER TABLE beginner_agent_memory
                 ADD COLUMN IF NOT EXISTS importance DOUBLE PRECISION NOT NULL DEFAULT 0.5
                 """
@@ -451,6 +520,26 @@ class PostgresMemoryStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tags
                 ON beginner_agent_memory USING GIN (tags)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_audit_memory_id
+                ON beginner_agent_memory_audit (memory_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_audit_created_at
+                ON beginner_agent_memory_audit (created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                DELETE FROM beginner_agent_memory
+                WHERE expires_at IS NOT NULL
+                  AND expires_at <= NOW()
+                  AND pinned = FALSE
                 """
             )
             conn.execute(
@@ -565,6 +654,35 @@ class PostgresMemoryStore:
             )
         return records
 
+    def upsert_audit_event(self, event: MemoryAuditEvent) -> None:
+        """写入 memory audit event。"""
+
+        self._ensure_table()
+        data = event.model_dump(mode="json")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO beginner_agent_memory_audit (
+                    id, action, memory_id, reason, backend, created_at, metadata
+                )
+                VALUES (
+                    %(id)s, %(action)s, %(memory_id)s, %(reason)s,
+                    %(backend)s, %(created_at)s::timestamptz, %(metadata)s::jsonb
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    action = EXCLUDED.action,
+                    memory_id = EXCLUDED.memory_id,
+                    reason = EXCLUDED.reason,
+                    backend = EXCLUDED.backend,
+                    created_at = EXCLUDED.created_at,
+                    metadata = EXCLUDED.metadata
+                """,
+                {
+                    **data,
+                    "metadata": json.dumps(data["metadata"], ensure_ascii=False),
+                },
+            )
+
     def upsert_record(self, record: MemoryRecord) -> None:
         self._ensure_table()
         data = record.model_dump(mode="json")
@@ -616,6 +734,26 @@ class PostgresMemoryStore:
                     "metadata": json.dumps(data["metadata"], ensure_ascii=False),
                 },
             )
+            if record.supersedes:
+                conn.execute(
+                    """
+                    UPDATE beginner_agent_memory
+                    SET validity_status = 'superseded'
+                    WHERE id = %s AND id <> %s
+                    """,
+                    (record.supersedes, record.id),
+                )
+            if record.contradiction_key:
+                conn.execute(
+                    """
+                    UPDATE beginner_agent_memory
+                    SET validity_status = 'superseded'
+                    WHERE contradiction_key = %s
+                      AND id <> %s
+                      AND validity_status = 'active'
+                    """,
+                    (record.contradiction_key, record.id),
+                )
         self.upsert_embedding(record)
 
     def upsert_embedding(self, record: MemoryRecord) -> None:
@@ -730,7 +868,7 @@ class PostgresMemoryStore:
 
 def memory_record_json_schema() -> dict[str, Any]:
     """导出 MemoryRecord 的 JSON Schema。"""
-
+    # model_json_schema() 是从 Pydantic 的 BaseModel 继承来的方法
     return MemoryRecord.model_json_schema()
 
 
@@ -818,9 +956,79 @@ def _record_is_active(record: dict[str, Any]) -> bool:
     return expires_at is None or expires_at > datetime.now(timezone.utc)
 
 
+def _record_should_be_deleted(record: dict[str, Any]) -> bool:
+    """判断过期记忆是否应该被物理清理。"""
+
+    if bool(record.get("pinned", False)):
+        return False
+    expires_at = _parse_datetime(record.get("expires_at"))
+    return expires_at is not None and expires_at <= datetime.now(timezone.utc)
+
+
+def _record_created_at(record: dict[str, Any]) -> datetime:
+    """读取记录创建时间，解析失败时使用很早的时间。"""
+
+    return _parse_datetime(record.get("created_at")) or datetime.min.replace(
+        tzinfo=timezone.utc
+    )
+
+
+def _dedupe_contradiction_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同 contradiction_key 只保留最新 active 记忆。
+
+    中文注释：
+    contradiction_key 表示“这些记忆在同一个问题上可能互相修正”。
+    例如：
+    - 旧记忆：embedding 默认模型是 A。
+    - 新记忆：embedding 默认模型已经改成 B。
+
+    这时不应该把 A 和 B 同时喂给 Planner。
+    当前策略是：同 key 只返回最新 active 记录。
+    """
+
+    without_key: list[dict[str, Any]] = []
+    latest_by_key: dict[str, dict[str, Any]] = {}
+    for record in records:
+        key = str(record.get("contradiction_key") or "").strip()
+        if not key:
+            without_key.append(record)
+            continue
+        current = latest_by_key.get(key)
+        if current is None or _record_created_at(record) > _record_created_at(current):
+            latest_by_key[key] = record
+    return [*without_key, *latest_by_key.values()]
+
+
 def _scope_matches_state(record: dict[str, Any], state: State) -> bool:
     """判断记忆 scope 是否适合当前任务。"""
 
+    # 后续 TODO：Memory Scope Intelligence
+    #
+    # 中文注释：
+    # 当前函数只做“硬规则过滤”，它适合守住安全边界：
+    # - global / user / project 级记忆可以进入候选池。
+    # - task 级记忆只能匹配当前 task_id。
+    # - tool 级记忆只能匹配当前工具。
+    # - file 级记忆只能匹配当前文件路径。
+    #
+    # 更接近大厂风格的下一步，不是把这里直接替换成 LLM 判断，
+    # 而是在硬过滤之后增加单独的智能层：
+    #
+    # 1. MemoryReranker
+    #    对已经通过 scope 硬过滤的候选记忆重新排序。
+    #
+    # 2. MemoryRelevanceJudge
+    #    用 LLM / reranker / cross-encoder 判断记忆是否真的有帮助。
+    #
+    # 3. MemoryUsageAudit
+    #    记录“哪条记忆影响了哪个 Planner / Evaluator 决策”。
+    #
+    # 4. MemoryAccessPolicy
+    #    对敏感 scope 做更严格权限控制，例如 user / file / thread。
+    #
+    # 原则：
+    #   这个函数继续保持简单、稳定、可解释；
+    #   智能判断放到后面的 reranker / judge / audit 层。
     scope = str(record.get("scope", "project"))
     if scope in {"global", "user", "project"}:
         return True
@@ -877,6 +1085,39 @@ def _safe_memory_value(value: Any, *, key: str = "") -> Any:
     return value
 
 
+def _memory_has_success_evidence(pending_memory: dict[str, Any]) -> bool:
+    """判断 pending_memory 是否带有可验证成功证据。
+
+    中文注释：
+    生产级 memory 不应该只因为模型说“成功了”就长期保存。
+    更可信的证据通常来自：
+    - tests_passed
+    - build_passed
+    - verification_passed
+    - lint_passed / typecheck_passed
+    - human_confirmed / approval
+    """
+
+    data = pending_memory.get("tool_result_data")
+    if not isinstance(data, dict):
+        data = {}
+    evidence_keys = {
+        "tests_passed",
+        "build_passed",
+        "verification_passed",
+        "lint_passed",
+        "typecheck_passed",
+        "human_confirmed",
+        "approval",
+    }
+    if any(bool(data.get(key)) for key in evidence_keys):
+        return True
+    metadata = pending_memory.get("metadata")
+    if isinstance(metadata, dict) and any(bool(metadata.get(key)) for key in evidence_keys):
+        return True
+    return any(bool(pending_memory.get(key)) for key in evidence_keys)
+
+
 def _memory_policy_for_pending(
     state: State,
     pending_memory: dict[str, Any],
@@ -894,6 +1135,50 @@ def _memory_policy_for_pending(
     - secret_scan 相关内容不存原始结果，只允许存摘要。
     """
 
+    # Production Memory Policy
+    #
+    # 中文注释：
+    # 当前 MemoryPolicy 已经不只是简单 if/else。
+    # 它会和 _govern_memory_record_before_write(...) 配合，形成：
+    # - 规则判断。
+    # - 证据保留。
+    # - 多次成功 promotion。
+    # - supersedes / contradiction_key 治理。
+    # - store / discard / retrieve 审计。
+    #
+    # 已实现：
+    #
+    # 1. Evidence-based Retention 雏形
+    #    - 有测试通过 / build 通过 / 人工确认 -> long_term 或 pinned。
+    #    - 只是一次临时失败日志 -> ttl。
+    #    - 没有可验证证据 -> 降低 importance 或 discard。
+    #
+    # 2. Frequency-based Promotion
+    #    同类成功经验多次出现后，自动提高 importance。
+    #    例如同一个修复模式连续 3 次成功，可以晋升为 pinned 候选。
+    #
+    # 3. Failure Memory Governance 雏形
+    #    失败经验有价值，但也容易过期。
+    #    当前失败默认 TTL，避免长期污染记忆库。
+    #
+    # 4. Human-confirmed Memory
+    #    governance 层会读取 approval / reviewer / human_confirmed 信号，
+    #    并提升 confidence、importance、pinned。
+    #
+    # 5. Sensitive Memory Policy
+    #    安全相关工具不应该保存原始密钥、token、隐私内容。
+    #    当前会做轻量脱敏，并把拒绝保存原因写入 audit log。
+    #
+    # 后续 TODO：
+    #
+    # 6. LLM Memory Judge
+    #    不要让 LLM 直接替代这层硬规则。
+    #    更合理的是：规则先过滤明显情况，再让 LLM / reranker
+    #    判断“这条记忆是否值得长期保存、是否会误导后续任务”。
+    #
+    # 7. DLP / Secret Scanner
+    #    当前是轻量正则脱敏。
+    #    后续可以接入更强 secret scanner / DLP 策略。
     title = str(pending_memory.get("title", "")).strip()
     reason = str(pending_memory.get("reason", "")).strip()
     if not title and not reason:
@@ -916,6 +1201,14 @@ def _memory_policy_for_pending(
             "失败经验可帮助后续恢复，但默认 TTL。",
             retention_policy="ttl",
             importance=0.75,
+        )
+
+    if tool_result_status == "success" and _memory_has_success_evidence(pending_memory):
+        return MemoryPolicyDecision(
+            "store",
+            "有测试/build/人工确认等成功证据，长期保留。",
+            retention_policy="long_term",
+            importance=0.9,
         )
 
     if tool_name in {"apply_patch", "apply_patch_plan", "rollback", "revert_file_patch"}:
@@ -1016,6 +1309,46 @@ def _stable_memory_id(record: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _stable_audit_id(event: dict[str, Any]) -> str:
+    """为 audit event 生成稳定 ID。"""
+
+    raw = json.dumps(
+        event,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_audit_event(
+    *,
+    action: MemoryAuditAction,
+    memory_id: str,
+    reason: str,
+    backend: str,
+    metadata: dict[str, Any] | None = None,
+) -> MemoryAuditEvent:
+    """构造标准化 memory audit event。"""
+
+    safe_metadata = _safe_memory_value(metadata or {})
+    raw_event = {
+        "action": action,
+        "memory_id": memory_id,
+        "reason": reason,
+        "backend": backend,
+        "metadata": safe_metadata,
+    }
+    return MemoryAuditEvent(
+        id=_stable_audit_id(raw_event),
+        action=action,
+        memory_id=memory_id,
+        reason=reason,
+        backend=backend,
+        metadata=safe_metadata,
+    )
+
+
 def _read_jsonl_memory_records(limit: int) -> list[dict[str, Any]]:
     """从 JSONL fallback 文件读取历史记忆。
 
@@ -1038,6 +1371,10 @@ def _read_jsonl_memory_records(limit: int) -> list[dict[str, Any]]:
             continue
         if isinstance(data, dict):
             records.append(data)
+    kept_records = [record for record in records if not _record_should_be_deleted(record)]
+    if len(kept_records) != len(records):
+        _write_jsonl_memory_records(kept_records)
+    records = kept_records
     return records[-limit:]
 
 
@@ -1055,12 +1392,66 @@ def _write_jsonl_memory_records(records: list[dict[str, Any]]) -> None:
     )
 
 
+def _read_jsonl_audit_events(limit: int) -> list[dict[str, Any]]:
+    """读取 JSONL fallback 审计事件。"""
+
+    _ensure_memory_file()
+    if not MEMORY_AUDIT_FILE.exists():
+        MEMORY_AUDIT_FILE.write_text("", encoding="utf-8")
+    events: list[dict[str, Any]] = []
+    for line in MEMORY_AUDIT_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            events.append(data)
+    return events[-limit:]
+
+
+def _write_jsonl_audit_events(events: list[dict[str, Any]]) -> None:
+    """把审计事件写回 JSONL fallback 文件。"""
+
+    _ensure_memory_file()
+    trimmed = events[-MAX_MEMORY_AUDIT_EVENTS:]
+    MEMORY_AUDIT_FILE.write_text(
+        "".join(
+            f"{json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n"
+            for event in trimmed
+        ),
+        encoding="utf-8",
+    )
+
+
+def _upsert_jsonl_audit_event(event: dict[str, Any]) -> None:
+    """插入或更新一条 JSONL audit event。"""
+
+    events = _read_jsonl_audit_events(MAX_MEMORY_AUDIT_EVENTS)
+    event_id = str(event["id"])
+    kept = [item for item in events if str(item.get("id", "")) != event_id]
+    kept.append(event)
+    _write_jsonl_audit_events(kept)
+
+
 def _upsert_jsonl_memory_record(record: dict[str, Any]) -> None:
     """插入或更新一条记忆。"""
 
     records = _read_jsonl_memory_records(MAX_MEMORY_RECORDS)
     record_id = str(record["id"])
+    supersedes = str(record.get("supersedes") or "").strip()
+    contradiction_key = str(record.get("contradiction_key") or "").strip()
     kept = [item for item in records if str(item.get("id", "")) != record_id]
+    for item in kept:
+        same_superseded_id = supersedes and str(item.get("id", "")) == supersedes
+        same_contradiction_key = (
+            contradiction_key
+            and str(item.get("contradiction_key") or "") == contradiction_key
+            and str(item.get("validity_status", "active")) == "active"
+        )
+        if same_superseded_id or same_contradiction_key:
+            item["validity_status"] = "superseded"
     kept.append(record)
     _write_jsonl_memory_records(kept)
 
@@ -1080,6 +1471,7 @@ def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
             for record in store.list_records(MAX_MEMORY_RECORDS)
             if _record_is_active(record)
         ]
+        records = _dedupe_contradiction_records(records)
         return records, store.backend_name, ""
     except Exception as exc:
         fallback = JsonlMemoryStore()
@@ -1088,6 +1480,7 @@ def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
             for record in fallback.list_records(MAX_MEMORY_RECORDS)
             if _record_is_active(record)
         ]
+        records = _dedupe_contradiction_records(records)
         return records, fallback.backend_name, str(exc)
 
 
@@ -1102,16 +1495,201 @@ def _search_vector_records(query_text: str) -> tuple[list[dict[str, Any]], str, 
         return [], "jsonl-fallback", str(exc)
 
 
+def _records_share_memory_pattern(record: MemoryRecord, existing: dict[str, Any]) -> bool:
+    """判断两条记忆是否属于同一类可复用经验。"""
+
+    if str(existing.get("tool_result_status", "")) != "success":
+        return False
+    if str(existing.get("kind", "")) != record.kind:
+        return False
+    if str(existing.get("tool_name", "")) != record.tool_name:
+        return False
+    if (
+        record.contradiction_key
+        and str(existing.get("contradiction_key") or "") == record.contradiction_key
+    ):
+        return True
+    existing_paths = {str(path) for path in existing.get("paths", [])}
+    return bool(existing_paths.intersection(record.paths))
+
+
+def _govern_memory_record_before_write(
+    record: MemoryRecord,
+    existing_records: list[dict[str, Any]],
+    *,
+    backend: str,
+) -> tuple[MemoryRecord, list[MemoryAuditEvent]]:
+    """写入前执行记忆治理。
+
+    中文注释：
+    这里把原来 TODO 里的几件事落成代码：
+    - supersedes：新记录明确修正旧记录时，写审计事件。
+    - contradiction_key：同一问题的新记录会让旧记录失效。
+    - promotion：同类成功经验多次出现时，提高 importance / pinned。
+
+    真正更新旧记录状态由 store 层完成：
+    - PostgresMemoryStore.upsert_record(...)
+    - _upsert_jsonl_memory_record(...)
+    """
+
+    events: list[MemoryAuditEvent] = []
+    updates: dict[str, Any] = {}
+    metadata_updates = dict(record.metadata)
+
+    if record.supersedes:
+        events.append(
+            _build_audit_event(
+                action="supersede",
+                memory_id=record.id,
+                reason="新记忆声明 supersedes，旧记忆将被标记为 superseded。",
+                backend=backend,
+                metadata={
+                    "supersedes": record.supersedes,
+                    "new_memory_id": record.id,
+                },
+            )
+        )
+
+    if record.contradiction_key:
+        shadowed_ids = [
+            str(item.get("id"))
+            for item in existing_records
+            if str(item.get("id", "")) != record.id
+            and str(item.get("contradiction_key") or "") == record.contradiction_key
+            and str(item.get("validity_status", "active")) == "active"
+        ]
+        if shadowed_ids:
+            events.append(
+                _build_audit_event(
+                    action="supersede",
+                    memory_id=record.id,
+                    reason="同 contradiction_key 的旧 active 记忆将被新记忆覆盖。",
+                    backend=backend,
+                    metadata={
+                        "contradiction_key": record.contradiction_key,
+                        "shadowed_memory_ids": shadowed_ids[:20],
+                    },
+                )
+            )
+
+    matching_successes = [
+        item for item in existing_records if _records_share_memory_pattern(record, item)
+    ]
+    human_confirmed = bool(
+        metadata_updates.get("approval")
+        or metadata_updates.get("human_confirmed")
+        or metadata_updates.get("reviewer")
+    )
+    should_promote = (
+        record.tool_result_status == "success"
+        and (
+            len(matching_successes) + 1 >= MEMORY_PROMOTION_SUCCESS_THRESHOLD
+            or human_confirmed
+        )
+    )
+    if should_promote:
+        updates["importance"] = max(record.importance, 0.95)
+        updates["pinned"] = True
+        updates["retention_policy"] = "pinned"
+        updates["expires_at"] = None
+        metadata_updates["memory_promotion"] = {
+            "reason": "同类成功经验多次出现或经过人工确认。",
+            "matching_success_count": len(matching_successes) + 1,
+            "human_confirmed": human_confirmed,
+        }
+        updates["metadata"] = metadata_updates
+        events.append(
+            _build_audit_event(
+                action="promote",
+                memory_id=record.id,
+                reason="记忆被提升为 pinned 长期经验。",
+                backend=backend,
+                metadata=metadata_updates["memory_promotion"],
+            )
+        )
+
+    if not updates:
+        return record, events
+    return record.model_copy(update=updates), events
+
+
 def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str]:
     """写入 memory record，并返回 backend 信息。"""
 
     try:
         store = _configured_store()
-        store.upsert_record(record)
+        existing_records = store.list_records(MAX_MEMORY_RECORDS)
+        governed_record, governance_events = _govern_memory_record_before_write(
+            record,
+            existing_records,
+            backend=store.backend_name,
+        )
+        store.upsert_record(governed_record)
+        for event in governance_events:
+            store.upsert_audit_event(event)
+        store.upsert_audit_event(
+            _build_audit_event(
+                action="store",
+                memory_id=governed_record.id,
+                reason="Memory Writer 写入结构化记忆。",
+                backend=store.backend_name,
+                metadata={
+                    "kind": governed_record.kind,
+                    "tool_name": governed_record.tool_name,
+                    "retention_policy": governed_record.retention_policy,
+                    "importance": governed_record.importance,
+                    "pinned": governed_record.pinned,
+                },
+            )
+        )
         return store.backend_name, ""
     except Exception as exc:
         fallback = JsonlMemoryStore()
-        fallback.upsert_record(record)
+        existing_records = fallback.list_records(MAX_MEMORY_RECORDS)
+        governed_record, governance_events = _govern_memory_record_before_write(
+            record,
+            existing_records,
+            backend=fallback.backend_name,
+        )
+        fallback.upsert_record(governed_record)
+        for event in governance_events:
+            fallback.upsert_audit_event(event)
+        fallback.upsert_audit_event(
+            _build_audit_event(
+                action="fallback",
+                memory_id=governed_record.id,
+                reason="主 memory store 不可用，写入 JSONL fallback。",
+                backend=fallback.backend_name,
+                metadata={
+                    "error": str(exc),
+                    "kind": governed_record.kind,
+                    "tool_name": governed_record.tool_name,
+                },
+            )
+        )
+        return fallback.backend_name, str(exc)
+
+
+def _upsert_memory_audit_event(event: MemoryAuditEvent) -> tuple[str, str]:
+    """写入 memory audit event，并在失败时回退 JSONL。"""
+
+    try:
+        store = _configured_store()
+        store.upsert_audit_event(event)
+        return store.backend_name, ""
+    except Exception as exc:
+        fallback = JsonlMemoryStore()
+        fallback.upsert_audit_event(
+            event.model_copy(
+                update={
+                    "backend": fallback.backend_name,
+                    "metadata": {
+                        **event.metadata,
+                        "fallback_error": str(exc),
+                    },
+                }
+            )
+        )
         return fallback.backend_name, str(exc)
 
 
@@ -1304,6 +1882,7 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
         for record in vector_records
         if _record_is_active(record) and _scope_matches_state(record, state)
     ]
+    vector_records = _dedupe_contradiction_records(vector_records)
     scored = [(record, _score_record(record, state)) for record in records]
     relevant = [item for item in scored if item[1] > 0]
     relevant.sort(key=lambda item: item[1], reverse=True)
@@ -1364,14 +1943,36 @@ def memory_retriever_node(state: State) -> dict[str, object]:
 
     state_notes = list(state["memory_notes"])[-5:]
     persisted_records, backend, backend_error = _retrieve_relevant_records(state)
+    retrieved_ids = [str(record.get("id", "")) for record in persisted_records]
+    audit_backend, audit_error = _upsert_memory_audit_event(
+        _build_audit_event(
+            action="retrieve",
+            memory_id=state.get("current_task_id", "") or "memory_retriever",
+            reason="Memory Retriever 将相关记忆写入 memory_context。",
+            backend=backend,
+            metadata={
+                "retrieved_memory_ids": retrieved_ids,
+                "retrieved_count": len(retrieved_ids),
+                "backend_error": backend_error,
+            },
+        )
+    )
     memory_context = {
         "source": "state.memory_notes + postgres/pgvector memory with jsonl fallback",
         "backend": backend,
         "backend_error": backend_error,
+        "audit_backend": audit_backend,
+        "audit_error": audit_error,
         "record_schema": memory_record_json_schema(),
         "governance": {
             "filters": ["active", "not_expired", "scope_matched"],
-            "ranking": ["vector_distance", "rule_score", "importance", "confidence", "pinned"],
+            "ranking": [
+                "vector_distance",
+                "rule_score",
+                "importance",
+                "confidence",
+                "pinned",
+            ],
         },
         "state_note_count": len(state_notes),
         "persisted_match_count": len(persisted_records),
@@ -1444,6 +2045,19 @@ def memory_writer_node(state: State) -> dict[str, object]:
         tool_result_status=tool_result_status,
     )
     if policy.action == "discard":
+        _upsert_memory_audit_event(
+            _build_audit_event(
+                action="discard",
+                memory_id=task_id,
+                reason=policy.reason,
+                backend="memory_policy",
+                metadata={
+                    "tool_name": tool_name,
+                    "tool_result_status": tool_result_status,
+                    "pending_memory": _safe_memory_value(pending_memory),
+                },
+            )
+        )
         update["messages"] = [
             {
                 "role": "assistant",
