@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import urllib.error
@@ -8,7 +7,6 @@ import urllib.request
 from typing import Protocol
 
 
-DEFAULT_EMBEDDING_DIM = 384
 DEFAULT_QWEN3_EMBEDDING_DIM = 1024
 
 
@@ -20,54 +18,35 @@ class EmbeddingProvider(Protocol):
     真正把文本变成向量的是 embedding provider。
 
     这样拆开后：
-    - 本地测试可以用 HashEmbeddingProvider。
-    - 如果 OMLX 支持 /embeddings，可以切到 OmlxEmbeddingProvider。
+    - 当前使用 OmlxEmbeddingProvider 调用真正的 embedding 模型。
     - 以后也可以换 OpenAI、bge、Qwen embedding、sentence-transformers。
     """
 
+    # 中文注释：
+    # Protocol 可以理解成“接口”或“约定”，它不是用来直接干活的类。
+    # 这里的意思是：任何 embedding provider，只要有下面这些属性和方法，
+    # 就可以被当作 EmbeddingProvider 使用。
+    #
+    # Python 的 Protocol 是“看结构”的：
+    # 具体 provider 不需要显式继承 EmbeddingProvider。
+    # 只要它也有 provider_name、model_name、dimension 和 embed_text(...)，
+    # 类型检查器就认为它符合这个协议。
     provider_name: str
     model_name: str
     dimension: int
 
     def embed_text(self, text: str) -> list[float]:
-        """把文本转成固定维度向量。"""
+        """把文本转成固定维度向量。
 
+        中文注释：
+        这个函数里只有 docstring，没有 pass，也没有真正的代码，
+        是可以通过的。
+        因为 docstring 本身就是一个合法的函数体。
 
-class HashEmbeddingProvider:
-    """确定性本地 embedding provider。
-
-    中文注释：
-    这不是语义 embedding，不能理解文本意思。
-    它的价值是：
-    - 不依赖外部模型。
-    - 维度固定。
-    - 每次同一文本生成同一向量。
-    - 适合测试 pgvector 写入、查询、排序链路。
-
-    真正生产效果要换成 OMLX/OpenAI/本地 embedding 模型。
-    """
-
-    provider_name = "hash"
-    model_name = "hash-embedding-v1"
-
-    def __init__(self, dimension: int = DEFAULT_EMBEDDING_DIM) -> None:
-        self.dimension = dimension
-
-    def embed_text(self, text: str) -> list[float]:
-        values: list[float] = []
-        seed = text.encode("utf-8")
-        counter = 0
-        while len(values) < self.dimension:
-            digest = hashlib.sha256(seed + str(counter).encode("ascii")).digest()
-            for byte in digest:
-                # 中文注释：
-                # 把 0..255 压到 -1..1，形成稳定数值。
-                values.append((byte / 127.5) - 1.0)
-                if len(values) >= self.dimension:
-                    break
-            counter += 1
-        norm = sum(value * value for value in values) ** 0.5 or 1.0
-        return [round(value / norm, 8) for value in values]
+        但这里并不是实际生成向量的地方。
+        Protocol 里的这个方法只是声明“实现类必须提供 embed_text 方法”。
+        真正的实现请看下面的 OmlxEmbeddingProvider.embed_text。
+        """
 
 
 class OmlxEmbeddingProvider:
@@ -81,7 +60,8 @@ class OmlxEmbeddingProvider:
     并且所选模型是 embedding 模型时，这个 provider 才能工作。
 
     截图里的 Qwen3-ASR 是语音识别模型，不适合作为 embedding 模型。
-    如果 OMLX 里没有 embedding 模型，系统会回退到 HashEmbeddingProvider。
+    如果 OMLX 里没有 embedding 模型，
+    系统会直接报错，提醒你先配置真实 embedding 模型。
     """
 
     provider_name = "omlx"
@@ -139,7 +119,8 @@ class OmlxEmbeddingProvider:
         vector = [float(value) for value in embedding]
         if len(vector) != self.dimension:
             raise RuntimeError(
-                f"OMLX embedding 维度不匹配：期望 {self.dimension}，实际 {len(vector)}。"
+                "OMLX embedding 维度不匹配："
+                f"期望 {self.dimension}，实际 {len(vector)}。"
             )
         return vector
 
@@ -147,7 +128,7 @@ class OmlxEmbeddingProvider:
 def configured_embedding_provider() -> EmbeddingProvider:
     """根据环境变量选择 embedding provider。"""
 
-    provider = os.getenv("BEGINNER_AGENT_EMBEDDING_PROVIDER", "hash").strip().lower()
+    provider = os.getenv("BEGINNER_AGENT_EMBEDDING_PROVIDER", "omlx").strip().lower()
     if provider == "omlx":
         dimension = int(
             os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", str(DEFAULT_QWEN3_EMBEDDING_DIM))
@@ -155,34 +136,32 @@ def configured_embedding_provider() -> EmbeddingProvider:
         return OmlxEmbeddingProvider(
             base_url=os.getenv("OMLX_BASE_URL", "http://127.0.0.1:8000/v1"),
             api_key=os.getenv("OMLX_API_KEY", "local-omlx-key"),
-            model_name=os.getenv("OMLX_EMBEDDING_MODEL", "Qwen3-Embedding-8B"),
+            model_name=os.getenv(
+                "OMLX_EMBEDDING_MODEL", "Qwen3-Embedding-8B-4bit-DWQ"
+            ),
             dimension=dimension,
             send_dimensions=os.getenv(
                 "OMLX_EMBEDDING_SEND_DIMENSIONS", "true"
             ).strip().lower()
             not in {"0", "false", "no"},
         )
-    dimension = int(os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM)))
-    return HashEmbeddingProvider(dimension=dimension)
+    raise ValueError(f"不支持的 embedding provider：{provider}。当前只支持 omlx。")
 
 
 def safe_embedding(text: str) -> tuple[list[float], str, str, int]:
-    """生成 embedding，失败时回退 hash provider。
+    """生成真实 embedding。
 
     返回：
         vector, provider_name, model_name, dimension
     """
 
     provider = configured_embedding_provider()
-    try:
-        return provider.embed_text(text), provider.provider_name, provider.model_name, provider.dimension
-    except Exception:
-        # 中文注释：
-        # 如果 OMLX 模型还没下载完或服务暂时不可用，
-        # 这里回退到同维度 hash embedding。
-        # 这样数据库表维度仍然一致，memory 链路不会被模型下载状态卡死。
-        fallback = HashEmbeddingProvider(dimension=provider.dimension)
-        return fallback.embed_text(text), fallback.provider_name, fallback.model_name, fallback.dimension
+    return (
+        provider.embed_text(text),
+        provider.provider_name,
+        provider.model_name,
+        provider.dimension,
+    )
 
 
 def vector_to_sql(vector: list[float]) -> str:

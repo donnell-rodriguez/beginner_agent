@@ -30,6 +30,7 @@ MAX_RETRIEVED_RECORDS = 8
 MAX_INDEXED_VECTOR_DIMENSION = 2000
 MAX_MEMORY_TEXT_CHARS = 2000
 DEFAULT_MEMORY_TTL_DAYS = 30
+DEFAULT_MEMORY_BACKEND = "postgres"
 SENSITIVE_FIELD_NAMES = {
     "api_key",
     "authorization",
@@ -246,7 +247,18 @@ class MemoryStore(Protocol):
 
 
 class JsonlMemoryStore:
-    """本地 JSONL memory store。"""
+    """本地 JSONL fallback memory store。
+
+    中文注释：
+    当前项目的主记忆存储是 Postgres + pgvector。
+    JSONL 只作为 fallback：
+    - Postgres 没启动。
+    - DATABASE_URL 没配置。
+    - 本地开发临时离线。
+
+    这样 agent 不会因为数据库暂时不可用而完全中断，
+    但正常情况下不要把 JSONL 当成主记忆库。
+    """
 
     backend_name = "jsonl"
 
@@ -935,14 +947,38 @@ def _memory_policy_for_pending(
 
 
 def _configured_store() -> MemoryStore:
-    """根据环境变量选择 memory store。"""
+    """根据环境变量选择主 memory store。
 
-    backend = os.getenv("BEGINNER_AGENT_MEMORY_BACKEND", "jsonl").strip().lower()
-    if backend == "postgres":
+    中文注释：
+    生产风格的默认选择是 Postgres + pgvector。
+    因为它同时支持：
+    - 结构化字段查询。
+    - 持久化审计。
+    - pgvector 语义检索。
+
+    JSONL 仍然保留，但定位是 fallback。
+    如果你显式设置：
+
+        BEGINNER_AGENT_MEMORY_BACKEND=jsonl
+
+    才会直接使用 JSONL。
+    """
+
+    backend = os.getenv("BEGINNER_AGENT_MEMORY_BACKEND", DEFAULT_MEMORY_BACKEND)
+    backend = backend.strip().lower()
+    if backend == "jsonl":
+        return JsonlMemoryStore()
+    if backend in {"postgres", "pgvector", "vector"}:
         database_url = os.getenv("DATABASE_URL", "").strip()
         if database_url:
             return PostgresMemoryStore(database_url)
-    return JsonlMemoryStore()
+        raise RuntimeError(
+            "BEGINNER_AGENT_MEMORY_BACKEND=postgres 需要配置 DATABASE_URL。"
+        )
+    raise ValueError(
+        "不支持的 BEGINNER_AGENT_MEMORY_BACKEND："
+        f"{backend}。当前支持 postgres / pgvector / jsonl。"
+    )
 
 
 def _ensure_memory_file() -> None:
@@ -981,11 +1017,14 @@ def _stable_memory_id(record: dict[str, Any]) -> str:
 
 
 def _read_jsonl_memory_records(limit: int) -> list[dict[str, Any]]:
-    """从 JSONL 文件读取历史记忆。
+    """从 JSONL fallback 文件读取历史记忆。
 
     中文注释：
     JSONL 是一行一个 JSON。
-    这个格式简单、可追加、方便肉眼查看，适合当前本地版 agent。
+    这个格式简单、可追加、方便肉眼查看。
+
+    但在当前架构里，它不是主记忆库。
+    主记忆库是 Postgres + pgvector。
     """
 
     _ensure_memory_file()
@@ -1034,8 +1073,8 @@ def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
     它会回退到 JSONL，并把错误原因写进 memory_context。
     """
 
-    store = _configured_store()
     try:
+        store = _configured_store()
         records = [
             record
             for record in store.list_records(MAX_MEMORY_RECORDS)
@@ -1055,19 +1094,19 @@ def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
 def _search_vector_records(query_text: str) -> tuple[list[dict[str, Any]], str, str]:
     """执行向量检索，并返回 backend 信息。"""
 
-    store = _configured_store()
     try:
+        store = _configured_store()
         records = store.search_similar_records(query_text, MAX_RETRIEVED_RECORDS)
         return records, store.backend_name, ""
     except Exception as exc:
-        return [], store.backend_name, str(exc)
+        return [], "jsonl-fallback", str(exc)
 
 
 def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str]:
     """写入 memory record，并返回 backend 信息。"""
 
-    store = _configured_store()
     try:
+        store = _configured_store()
         store.upsert_record(record)
         return store.backend_name, ""
     except Exception as exc:
@@ -1326,7 +1365,7 @@ def memory_retriever_node(state: State) -> dict[str, object]:
     state_notes = list(state["memory_notes"])[-5:]
     persisted_records, backend, backend_error = _retrieve_relevant_records(state)
     memory_context = {
-        "source": "state.memory_notes + governed persistent memory",
+        "source": "state.memory_notes + postgres/pgvector memory with jsonl fallback",
         "backend": backend,
         "backend_error": backend_error,
         "record_schema": memory_record_json_schema(),
@@ -1356,12 +1395,13 @@ def memory_retriever_node(state: State) -> dict[str, object]:
 
 
 def memory_writer_node(state: State) -> dict[str, object]:
-    """Memory Writer：把本轮任务经验写入轻量记忆和持久化 JSONL。
+    """Memory Writer：把本轮任务经验写入轻量记忆和持久化记忆库。
 
     中文注释：
-    当前是本地生产化的第一步：
+    当前是本地生产化的记忆写入链路：
     - State.memory_notes：方便你在运行结果里直接看到。
-    - memory.jsonl：方便跨运行保留经验。
+    - Postgres + pgvector：主记忆库，支持结构化查询和向量检索。
+    - memory.jsonl：fallback，只有主记忆库不可用时兜底。
     - MemoryRecord：让记忆有类型、状态、来源、路径和可信度。
 
     当前已经引入记忆治理：

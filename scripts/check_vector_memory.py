@@ -16,8 +16,8 @@ from beginner_agent.memory import MemoryRecord, PostgresMemoryStore  # noqa: E40
 def main() -> None:
     """验证 Postgres + pgvector memory 是否可写、可向量检索。"""
 
-    os.environ.setdefault("BEGINNER_AGENT_EMBEDDING_PROVIDER", "hash")
-    os.environ.setdefault("BEGINNER_AGENT_EMBEDDING_DIM", "384")
+    os.environ.setdefault("BEGINNER_AGENT_EMBEDDING_PROVIDER", "omlx")
+    os.environ.setdefault("BEGINNER_AGENT_EMBEDDING_DIM", "1024")
     database_url = os.getenv(
         "DATABASE_URL",
         "postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent",
@@ -36,8 +36,10 @@ def main() -> None:
         tags=["postgres", "pgvector", "memory", "embedding"],
         confidence=0.99,
         metadata={
-            "requested_embedding_provider": os.getenv("BEGINNER_AGENT_EMBEDDING_PROVIDER", "hash"),
-            "requested_embedding_dim": os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", "384"),
+            "requested_embedding_provider": os.getenv(
+                "BEGINNER_AGENT_EMBEDDING_PROVIDER", "omlx"
+            ),
+            "requested_embedding_dim": os.getenv("BEGINNER_AGENT_EMBEDDING_DIM", "1024"),
         },
     )
     store.upsert_record(record)
