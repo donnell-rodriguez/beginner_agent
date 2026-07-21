@@ -45,6 +45,11 @@ MemoryAuditAction = Literal[
     "supersede",
     "promote",
     "compact",
+    "expire",
+    "deprioritize",
+    "contradiction_check",
+    "summarize",
+    "rebuild_embedding",
     "fallback",
     "retrieve",
 ]
@@ -357,6 +362,12 @@ class MemoryStore(Protocol):
         所以需要批量标记为 superseded。
         """
 
+    def cleanup_expired_records(self) -> int:
+        """清理过期记忆，返回清理数量。"""
+
+    def rebuild_embeddings(self, limit: int) -> int:
+        """重建 memory embedding，返回处理数量。"""
+
     def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
         """语义检索相似记忆。"""
 
@@ -398,6 +409,17 @@ class JsonlMemoryStore:
             status,
             superseded_by=superseded_by,
         )
+
+    def cleanup_expired_records(self) -> int:
+        records = _read_jsonl_memory_records(MAX_MEMORY_RECORDS)
+        kept = [record for record in records if not _record_should_be_deleted(record)]
+        deleted = len(records) - len(kept)
+        if deleted:
+            _write_jsonl_memory_records(kept)
+        return deleted
+
+    def rebuild_embeddings(self, limit: int) -> int:
+        return 0
 
     def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
         return []
@@ -969,6 +991,41 @@ class PostgresMemoryStore:
                     ),
                 },
             )
+
+    def cleanup_expired_records(self) -> int:
+        """清理 Postgres 里的过期非 pinned 记忆。"""
+
+        self._ensure_table()
+        with self._connect() as conn:
+            result = conn.execute(
+                """
+                DELETE FROM beginner_agent_memory
+                WHERE expires_at IS NOT NULL
+                  AND expires_at <= NOW()
+                  AND pinned = FALSE
+                """
+            )
+            return int(result.rowcount or 0)
+
+    def rebuild_embeddings(self, limit: int) -> int:
+        """为最近 active memory 重建 embedding。
+
+        中文注释：
+        embedding 模型升级、维度变化、索引损坏后，
+        生命周期任务可以定期重建向量，而不是等检索时才发现问题。
+        """
+
+        records = self.list_records(limit)
+        rebuilt = 0
+        for record in records:
+            if str(record.get("validity_status", "active")) != "active":
+                continue
+            try:
+                self.upsert_embedding(MemoryRecord(**record))
+            except Exception:
+                continue
+            rebuilt += 1
+        return rebuilt
 
     def upsert_embedding(self, record: MemoryRecord) -> None:
         """为 MemoryRecord 写入 pgvector embedding。"""
