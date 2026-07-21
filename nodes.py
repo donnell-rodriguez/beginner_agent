@@ -22,7 +22,7 @@ from .planner import planner_decomposer_node, route_after_planner, tool_selector
 from .policy import route_after_policy, tool_policy_node
 from .recovery import recovery_planner_node, route_after_recovery_planner
 from .router import route_by_task, router_classifier_node
-from .sandbox import sandbox_runner_node
+from .sandbox import route_after_sandbox_runner, sandbox_runner_node
 from .scheduler import route_after_scheduler, scheduler_node
 from .simple_nodes import (
     chat_node,
@@ -57,6 +57,7 @@ __all__ = [
     "route_after_planner",
     "route_after_policy",
     "route_after_recovery_planner",
+    "route_after_sandbox_runner",
     "route_after_scheduler",
     "route_after_task_committer",
     "route_by_task",

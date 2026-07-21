@@ -25,6 +25,13 @@ def postgres_checkpoint_node(state: State) -> dict[str, Any]:
         "backend": backend,
         "persistent": backend == "postgres",
         "runtime_owned": True,
+        "run_id": state["run_id"],
+        "state_keys_tracked_by_graph": True,
+        "recovery_contract": {
+            "requires_thread_id": True,
+            "configured_in": "checkpointing.py",
+            "runtime_entry": "builder.compile(checkpointer=build_checkpointer())",
+        },
         "reason": (
             "Postgres checkpoint 可支持长任务恢复。"
             if backend == "postgres"

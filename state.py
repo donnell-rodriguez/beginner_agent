@@ -343,6 +343,13 @@ class State(TypedDict):
     """复杂 agent 运行过程中共享的状态。"""
 
     # 中文注释：
+    # run_id 表示一次 agent 运行的唯一 id。
+    #
+    # Artifact Storage / Observability / Async Job / Audit
+    # 都可以用它把同一次运行产生的数据串起来。
+    run_id: str
+
+    # 中文注释：
     # 用户最开始输入的问题或任务。
     user_input: str
 

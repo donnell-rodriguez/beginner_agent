@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .async_job_store import AsyncJobStore
 from .state import State
 
 
@@ -28,19 +29,26 @@ def async_job_waiter_node(state: State) -> dict[str, Any]:
     execution_status = str(active_execution.get("execution_status", state["execution_status"]))
 
     if job_id and execution_status == "waiting_external":
-        status = "waiting_external"
-        reason = f"等待远程 job {job_id} 完成。"
+        job = AsyncJobStore().wait_for_job(job_id)
+        status = str(job["status"])
+        reason = (
+            f"远程 job {job_id} 状态：{status}。"
+            if status in {"success", "failed", "cancelled", "timeout"}
+            else f"等待远程 job {job_id} 完成。"
+        )
     else:
+        job = {}
         status = "not_required"
         reason = "当前工具同步完成，不需要等待异步 job。"
 
-    return {
+    update: dict[str, Any] = {
         "async_job_report": {
             "status": status,
             "reason": reason,
             "job_id": job_id,
             "execution_status": execution_status,
             "worker_contract": worker_contract,
+            "job": job,
         },
         "next_action": "monitor",
         "messages": [
@@ -50,3 +58,23 @@ def async_job_waiter_node(state: State) -> dict[str, Any]:
             }
         ],
     }
+    if status == "success":
+        result = dict(job.get("result") or {})
+        update.update(
+            {
+                "execution_status": "completed",
+                "tool_result_status": "success",
+                "tool_result": str(result.get("output", "远程 job 执行成功。")),
+                "tool_result_data": result,
+            }
+        )
+    elif status in {"failed", "cancelled", "timeout"}:
+        update.update(
+            {
+                "execution_status": "failed",
+                "tool_result_status": "failed",
+                "tool_result": str(job.get("error") or reason),
+                "tool_result_data": dict(job.get("result") or {}),
+            }
+        )
+    return update

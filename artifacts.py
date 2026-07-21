@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .artifact_store import write_artifact_manifest
 from .state import State
 
 
@@ -71,7 +72,7 @@ def artifact_collector_node(state: State) -> dict[str, Any]:
             "secret_scan",
         }
     ]
-    report = {
+    report: dict[str, Any] = {
         "changed_files": changed_files,
         "patch_count": len(state.get("patch_history", [])),
         "execution_attempt_count": len(state.get("execution_attempts", [])),
@@ -79,6 +80,22 @@ def artifact_collector_node(state: State) -> dict[str, Any]:
         "completed_task_count": len(state.get("completed_tasks", [])),
         "memory_note_count": len(state.get("memory_notes", [])),
     }
+    storage = write_artifact_manifest(
+        run_id=state["run_id"],
+        report=report,
+        state_snapshot={
+            "task_type": state["task_type"],
+            "risk_level": state["risk_level"],
+            "done": state["done"],
+            "step_count": state["step_count"],
+            "current_task_id": state["current_task_id"],
+            "tool_name": state["tool_name"],
+            "tool_result_status": state["tool_result_status"],
+            "execution_monitor_status": state["execution_monitor_status"],
+            "recovery_action": state["recovery_action"],
+        },
+    )
+    report["storage"] = storage
     return {
         "artifact_report": report,
         "messages": [

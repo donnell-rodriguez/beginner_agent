@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from .tools import READ_ONLY_TOOLS, WRITE_TOOLS
@@ -23,6 +24,7 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
     """
 
     return {
+        "run_id": f"run-{uuid.uuid4()}",
         "user_input": user_input,
         "task_type": "chat",
         "risk_level": "low",

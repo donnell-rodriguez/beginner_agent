@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from .observability_store import ObservabilityStore
 from .state import State
 
 
@@ -28,8 +29,9 @@ def observability_reporter_node(state: State) -> dict[str, Any]:
             status = str(task.get("status", "unknown"))
             statuses[status] = statuses.get(status, 0) + 1
 
-    report = {
+    report: dict[str, Any] = {
         "step_count": state["step_count"],
+        "run_id": state["run_id"],
         "done": state["done"],
         "next_action": state["next_action"],
         "task_status_counts": statuses,
@@ -52,6 +54,10 @@ def observability_reporter_node(state: State) -> dict[str, Any]:
         "async_job": state.get("async_job_report", {}),
         "artifacts": state.get("artifact_report", {}),
     }
+    report["storage"] = ObservabilityStore().record_report(
+        run_id=state["run_id"],
+        report=report,
+    )
     return {
         "observability_report": report,
         "messages": [

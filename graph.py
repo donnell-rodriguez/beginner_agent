@@ -28,6 +28,7 @@ from .nodes import (
     route_after_planner,
     route_after_policy,
     route_after_recovery_planner,
+    route_after_sandbox_runner,
     route_after_scheduler,
     route_after_task_committer,
     route_by_task,
@@ -103,13 +104,15 @@ def build_graph():
     注意：
     - patch planning 现在由 Planner + patch_plan/validate_patch_plan 工具承担。
     - approval gate 现在由 tool_policy_node + approval_interrupt_node 承担。
-    - sandbox runner 现在先记录本地受控运行边界。
-      后续可升级成容器或远程 sandbox。
-    - async job waiter 现在记录同步/异步状态，后续可升级成远程 worker 轮询。
+    - sandbox runner 现在有 backend contract，默认 local_controlled。
+      Docker / Firecracker / remote sandbox 的路线在 sandbox_backends/TODO.md。
+    - async job waiter 现在有本地 SQLite job contract，
+      后续 Executor 可把长任务提交给 remote worker。
     - test runner 现在由 run_tests / run_targeted_tests / run_impacted_tests 工具承担。
     - failure analyzer 现在由 evaluator_verifier_node 承担。
     - retry / rollback / memory commit 现在由 task_committer_node 承担。
-    - artifact collector / observability reporter 已经是独立节点。
+    - artifact collector 会写本地 artifact manifest。
+    - observability reporter 会写本地 SQLite 运行报告。
     - memory retriever/writer 已经是独立节点。
     - checkpoint 仍然属于 LangGraph runtime 层，由 compile(checkpointer=...) 配置。
       postgres_checkpoint_node 只负责把后端信息写入 State，方便最终报告展示。
@@ -247,8 +250,15 @@ def build_graph():
 
     # Sandbox Runner
     # Executor 前的受控运行边界。
-    # 当前是本地受控工具层，后续可替换成远程 sandbox。
-    builder.add_edge("sandbox_runner", "executor")
+    # backend 未配置或未实现时，直接进入 Evaluator，避免错误执行工具。
+    builder.add_conditional_edges(
+        "sandbox_runner",
+        route_after_sandbox_runner,
+        {
+            "execute": "executor",
+            "evaluate": "evaluator_verifier",
+        },
+    )
 
     # Executor
     # 真正执行工具。写工具执行前后会记录 patch_history，供 rollback 使用。

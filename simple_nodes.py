@@ -311,6 +311,7 @@ def code_agent_summarize_node(state: State) -> dict[str, Any]:
         json.dumps(
             {
                 "task_type": state["task_type"],
+                "run_id": state["run_id"],
                 "risk_level": state["risk_level"],
                 "done": state["done"],
                 "step_count": state["step_count"],
