@@ -3,20 +3,50 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
-from .models import AuditQuery, MemoryApiResponse, MemoryQuery
-from .repository import MemoryQueryRepository
+from .models import AuditQuery, MemoryApiResponse, MemoryQuery, PageInfo
+from .repository import MemoryQueryRepository, RepositoryResult
+from .security import (
+    ApiRequestContext,
+    RequestGovernanceMiddleware,
+    api_context,
+    require_role,
+    require_sensitive_access,
+)
 
 
-def _response(data: Any, backend: str, error: str = "") -> MemoryApiResponse:
+def _response(
+    data: Any,
+    backend: str,
+    *,
+    request_id: str,
+    error: str = "",
+    page: PageInfo | None = None,
+) -> MemoryApiResponse:
     count = len(data) if isinstance(data, list) else (1 if data else 0)
     return MemoryApiResponse(
         ok=not bool(error),
+        request_id=request_id,
         backend=backend,
         count=count,
+        page=page,
         data=data,
         error=error,
+    )
+
+
+def _repository_response(
+    result: RepositoryResult,
+    context: ApiRequestContext,
+) -> MemoryApiResponse:
+    return _response(
+        result.data,
+        result.backend,
+        request_id=context.request_id,
+        error=result.error,
+        page=result.page,
     )
 
 
@@ -24,12 +54,13 @@ def create_app() -> FastAPI:
     """创建 Memory Query API。
 
     中文注释：
-    这是只读 Admin API。
-    当前用于本地查询 memory 和 audit，后续可以接：
-    - Web dashboard。
-    - 登录鉴权。
-    - 分页和索引。
-    - 更细粒度的 RBAC / audit viewer。
+    这是只读 Admin API，但已经不再是“裸查询接口”：
+    - auth：支持 Bearer token / X-API-Key。
+    - RBAC：区分 memory_reader、audit_reader、sensitive_reader、admin。
+    - request_id：每个请求都有追踪 ID。
+    - rate limit：基础进程内限流。
+    - tenant isolation：仓库层按 tenant/workspace/project/user 过滤。
+    - sensitive approval：敏感内容必须有角色或审批 token。
     """
 
     app = FastAPI(
@@ -37,15 +68,37 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="Read-only API for memory, audit, failure patterns, and preferences.",
     )
+    app.add_middleware(RequestGovernanceMiddleware)
     repository = MemoryQueryRepository()
 
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(
+        request: Request,
+        exc: HTTPException,
+    ) -> JSONResponse:
+        request_id = str(getattr(request.state, "request_id", ""))
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=MemoryApiResponse(
+                ok=False,
+                request_id=request_id,
+                backend="memory-api",
+                count=0,
+                page=None,
+                data=None,
+                error=str(exc.detail),
+            ).model_dump(mode="json"),
+        )
+
     @app.get("/health", response_model=MemoryApiResponse)
-    def health() -> MemoryApiResponse:
-        return _response({"status": "ok"}, "memory-api")
+    def health(request: Request) -> MemoryApiResponse:
+        request_id = str(getattr(request.state, "request_id", ""))
+        return _response({"status": "ok"}, "memory-api", request_id=request_id)
 
     @app.get("/memories", response_model=MemoryApiResponse)
     def list_memories(
         limit: int = Query(default=50, ge=1, le=500),
+        cursor: str | None = None,
         kind: str | None = None,
         task_id: str | None = None,
         tool_name: str | None = None,
@@ -55,9 +108,13 @@ def create_app() -> FastAPI:
         failure_category: str | None = None,
         failure_pattern_id: str | None = None,
         include_sensitive: bool = False,
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
+        require_role(context, "memory_reader")
+        include_sensitive = require_sensitive_access(context, include_sensitive)
         query = MemoryQuery(
             limit=limit,
+            cursor=cursor,
             kind=kind,
             task_id=task_id,
             tool_name=tool_name,
@@ -68,128 +125,186 @@ def create_app() -> FastAPI:
             failure_pattern_id=failure_pattern_id,
             include_sensitive=include_sensitive,
         )
-        records, backend, error = repository.list_memories(query)
-        return _response(records, backend, error)
+        return _repository_response(repository.list_memories(query, context), context)
 
     @app.get("/memories/{memory_id}", response_model=MemoryApiResponse)
-    def get_memory(memory_id: str, include_sensitive: bool = False) -> MemoryApiResponse:
-        record, backend, error = repository.get_memory(
+    def get_memory(
+        memory_id: str,
+        include_sensitive: bool = False,
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "memory_reader")
+        include_sensitive = require_sensitive_access(context, include_sensitive)
+        result = repository.get_memory(
             memory_id,
             include_sensitive=include_sensitive,
+            context=context,
         )
-        if record is None:
+        if result.data is None:
             raise HTTPException(status_code=404, detail=f"memory not found: {memory_id}")
-        return _response(record, backend, error)
+        return _repository_response(result, context)
 
     @app.get("/memories/{memory_id}/why", response_model=MemoryApiResponse)
-    def why_saved(memory_id: str, include_sensitive: bool = False) -> MemoryApiResponse:
-        data, backend, error = repository.why_saved(
+    def why_saved(
+        memory_id: str,
+        include_sensitive: bool = False,
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        include_sensitive = require_sensitive_access(context, include_sensitive)
+        result = repository.why_saved(
             memory_id,
             include_sensitive=include_sensitive,
+            context=context,
         )
-        if data is None:
+        if result.data is None:
             raise HTTPException(status_code=404, detail=f"memory not found: {memory_id}")
-        return _response(data, backend, error)
+        return _repository_response(result, context)
 
     @app.get("/memories/{memory_id}/usage", response_model=MemoryApiResponse)
-    def usage(memory_id: str, include_sensitive: bool = False) -> MemoryApiResponse:
-        data, backend, error = repository.usage(
+    def usage(
+        memory_id: str,
+        include_sensitive: bool = False,
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        include_sensitive = require_sensitive_access(context, include_sensitive)
+        result = repository.usage(
             memory_id,
             include_sensitive=include_sensitive,
+            context=context,
         )
-        return _response(data, backend, error)
+        return _repository_response(result, context)
 
     @app.get("/memories/{memory_id}/feedback", response_model=MemoryApiResponse)
     def memory_feedback(
         memory_id: str,
         limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        data, backend, error = repository.feedback(memory_id, limit=limit)
-        return _response(data, backend, error)
+        require_role(context, "audit_reader")
+        return _repository_response(repository.feedback(memory_id, limit=limit), context)
 
     @app.get("/feedback", response_model=MemoryApiResponse)
     def all_feedback(
         limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        data, backend, error = repository.feedback(None, limit=limit)
-        return _response(data, backend, error)
+        require_role(context, "audit_reader")
+        return _repository_response(repository.feedback(None, limit=limit), context)
 
     @app.get("/eval-cases", response_model=MemoryApiResponse)
-    def eval_cases(limit: int = Query(default=100, ge=1, le=1000)) -> MemoryApiResponse:
-        data, backend, error = repository.eval_cases(limit=limit)
-        return _response(data, backend, error)
+    def eval_cases(
+        limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        return _repository_response(repository.eval_cases(limit=limit), context)
 
     @app.get("/rerank/telemetry", response_model=MemoryApiResponse)
     def rerank_telemetry(
         limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        data, backend, error = repository.rerank_telemetry(limit=limit)
-        return _response(data, backend, error)
+        require_role(context, "audit_reader")
+        return _repository_response(repository.rerank_telemetry(limit=limit), context)
 
     @app.get("/audit", response_model=MemoryApiResponse)
     def audit(
         limit: int = Query(default=100, ge=1, le=1000),
+        cursor: str | None = None,
         memory_id: str | None = None,
         run_id: str | None = None,
         action: str | None = None,
         include_sensitive: bool = False,
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        events, backend, error = repository.list_audit_events(
+        require_role(context, "audit_reader")
+        include_sensitive = require_sensitive_access(context, include_sensitive)
+        result = repository.list_audit_events(
             AuditQuery(
                 limit=limit,
+                cursor=cursor,
                 memory_id=memory_id,
                 run_id=run_id,
                 action=action,
                 include_sensitive=include_sensitive,
-            )
+            ),
+            context,
         )
-        return _response(events, backend, error)
+        return _repository_response(result, context)
 
     @app.get("/runs/{run_id}/lineage", response_model=MemoryApiResponse)
-    def run_lineage(run_id: str) -> MemoryApiResponse:
-        data, backend, error = repository.run_lineage(run_id)
-        return _response(data, backend, error)
+    def run_lineage(
+        run_id: str,
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        return _repository_response(repository.run_lineage(run_id), context)
 
     @app.get("/contradictions/{contradiction_key}", response_model=MemoryApiResponse)
     def contradiction_evolution(
         contradiction_key: str,
         include_sensitive: bool = False,
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        records, backend, error = repository.contradiction_evolution(
+        require_role(context, "memory_reader")
+        include_sensitive = require_sensitive_access(context, include_sensitive)
+        result = repository.contradiction_evolution(
             contradiction_key,
             include_sensitive=include_sensitive,
+            context=context,
         )
-        return _response(records, backend, error)
+        return _repository_response(result, context)
 
     @app.get("/pinned", response_model=MemoryApiResponse)
-    def pinned_memories(limit: int = Query(default=100, ge=1, le=500)) -> MemoryApiResponse:
-        records, backend, error = repository.list_memories(
-            MemoryQuery(limit=limit, pinned=True)
+    def pinned_memories(
+        limit: int = Query(default=100, ge=1, le=500),
+        cursor: str | None = None,
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "memory_reader")
+        return _repository_response(
+            repository.list_memories(
+                MemoryQuery(limit=limit, cursor=cursor, pinned=True),
+                context,
+            ),
+            context,
         )
-        return _response(records, backend, error)
 
     @app.get("/failures/patterns", response_model=MemoryApiResponse)
     def failure_patterns(
         limit: int = Query(default=100, ge=1, le=500),
         category: str | None = None,
         pattern_id: str | None = None,
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        patterns, backend, error = repository.failure_patterns(
-            limit=limit,
-            category=category,
-            pattern_id=pattern_id,
+        require_role(context, "memory_reader")
+        return _repository_response(
+            repository.failure_patterns(
+                limit=limit,
+                category=category,
+                pattern_id=pattern_id,
+                context=context,
+            ),
+            context,
         )
-        return _response(patterns, backend, error)
 
     @app.get("/files/{file_path:path}/memories", response_model=MemoryApiResponse)
     def file_memories(
         file_path: str,
         limit: int = Query(default=100, ge=1, le=500),
+        cursor: str | None = None,
+        context: ApiRequestContext = Depends(api_context),
     ) -> MemoryApiResponse:
-        records, backend, error = repository.list_memories(
-            MemoryQuery(limit=limit, file_path=file_path)
+        require_role(context, "memory_reader")
+        return _repository_response(
+            repository.list_memories(
+                MemoryQuery(limit=limit, cursor=cursor, file_path=file_path),
+                context,
+            ),
+            context,
         )
-        return _response(records, backend, error)
 
     return app
 

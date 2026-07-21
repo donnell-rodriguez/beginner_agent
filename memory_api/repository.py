@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
-import os
+from dataclasses import dataclass
 from typing import Any
 
 from beginner_agent.memory_audit import _build_audit_event
@@ -17,13 +18,69 @@ from beginner_agent.memory_settings import MAX_MEMORY_AUDIT_EVENTS, MAX_MEMORY_R
 from beginner_agent.memory_store import _configured_store, _upsert_memory_audit_event
 from beginner_agent.run_lineage import lineage_for_run_id
 
-from .models import AuditQuery, MemoryQuery
+from .models import AuditQuery, MemoryQuery, PageInfo
+from .security import ApiRequestContext, context_metadata
 
 
 SENSITIVE_REDACTION = {
     "redacted": True,
     "reason": "include_sensitive=false，敏感 metadata 默认不通过 API 展示。",
 }
+
+
+@dataclass(frozen=True)
+class RepositoryResult:
+    """Repository 统一返回结构。
+
+    中文注释：
+    以前仓库方法返回 tuple，字段多了以后很容易搞错顺序。
+    现在统一返回 data/backend/error/page，更接近生产代码里的 QueryResult。
+    """
+
+    data: Any
+    backend: str
+    error: str = ""
+    page: PageInfo | None = None
+
+
+def _decode_cursor(cursor: str | None) -> int:
+    """把 cursor 解码成 offset。"""
+
+    if not cursor:
+        return 0
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("utf-8")).decode("utf-8")
+        if not raw.startswith("offset:"):
+            return 0
+        return max(0, int(raw.split(":", 1)[1]))
+    except Exception:
+        return 0
+
+
+def _encode_cursor(offset: int) -> str:
+    raw = f"offset:{offset}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("utf-8")
+
+
+def _paginate(
+    items: list[dict[str, Any]],
+    *,
+    limit: int,
+    cursor: str | None,
+) -> tuple[list[dict[str, Any]], PageInfo]:
+    """对内存结果做 cursor 分页。
+
+    中文注释：
+    当前仓库仍会从 store 取一批记录再过滤。
+    所以这里用 offset cursor。
+    后续如果全部迁到 Postgres 查询，可以升级成 created_at + id cursor。
+    """
+
+    offset = _decode_cursor(cursor)
+    page_items = items[offset : offset + limit]
+    next_offset = offset + len(page_items)
+    next_cursor = _encode_cursor(next_offset) if next_offset < len(items) else ""
+    return page_items, PageInfo(limit=limit, cursor=cursor or "", next_cursor=next_cursor)
 
 
 def _metadata(record: dict[str, Any]) -> dict[str, Any]:
@@ -62,7 +119,47 @@ def _safe_event(event: dict[str, Any], *, include_sensitive: bool) -> dict[str, 
     return event
 
 
-def _audit_sensitive_api_access(record: dict[str, Any], *, include_sensitive: bool) -> None:
+def _record_visible_to_api_context(record: dict[str, Any], context: ApiRequestContext) -> bool:
+    """判断当前 API principal 是否可以看到这条 memory。
+
+    中文注释：
+    这就是 tenant isolation middleware 之后真正落到数据层的隔离规则。
+    middleware/依赖负责识别“你是谁”，仓库层负责判断“这条记录你能不能看”。
+    """
+
+    visibility = str(record.get("visibility", "project"))
+    principal = context.principal
+    if visibility == "public":
+        return True
+    if visibility == "tenant":
+        return str(record.get("tenant_id", "")) == principal.tenant_id
+    if visibility == "workspace":
+        return (
+            str(record.get("tenant_id", "")) == principal.tenant_id
+            and str(record.get("workspace_id", "")) == principal.workspace_id
+        )
+    if visibility in {"project", "retrieval_only"}:
+        return (
+            str(record.get("tenant_id", "")) == principal.tenant_id
+            and str(record.get("workspace_id", "")) == principal.workspace_id
+            and str(record.get("project_id", "")) == principal.project_id
+        )
+    if visibility == "private":
+        return (
+            str(record.get("tenant_id", "")) == principal.tenant_id
+            and str(record.get("workspace_id", "")) == principal.workspace_id
+            and str(record.get("project_id", "")) == principal.project_id
+            and str(record.get("user_id", "")) == principal.user_id
+        )
+    return False
+
+
+def _audit_sensitive_api_access(
+    record: dict[str, Any],
+    *,
+    include_sensitive: bool,
+    context: ApiRequestContext,
+) -> None:
     """记录 Memory Query API 对敏感记忆的访问。
 
     中文注释：
@@ -74,7 +171,6 @@ def _audit_sensitive_api_access(record: dict[str, Any], *, include_sensitive: bo
     sensitivity = str(record.get("sensitivity_level", "internal"))
     if sensitivity in {"public", "internal"}:
         return
-    actor_id = os.getenv("BEGINNER_AGENT_MEMORY_API_ACTOR_ID", "local-admin")
     _upsert_memory_audit_event(
         _build_audit_event(
             action="sensitive_access",
@@ -82,7 +178,7 @@ def _audit_sensitive_api_access(record: dict[str, Any], *, include_sensitive: bo
             reason="Memory Query API 访问敏感记忆。",
             backend="memory_api",
             metadata={
-                "actor_id": actor_id,
+                **context_metadata(context),
                 "include_sensitive": include_sensitive,
                 "sensitivity_level": sensitivity,
                 "visibility": record.get("visibility", ""),
@@ -136,6 +232,27 @@ def _matches_audit_query(event: dict[str, Any], query: AuditQuery) -> bool:
     return True
 
 
+def _audit_event_visible_to_context(event: dict[str, Any], context: ApiRequestContext) -> bool:
+    """判断审计事件是否属于当前 principal 的可见范围。"""
+
+    if "admin" in context.principal.roles:
+        return True
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict):
+        return True
+
+    tenant_id = str(metadata.get("tenant_id", "")).strip()
+    workspace_id = str(metadata.get("workspace_id", "")).strip()
+    project_id = str(metadata.get("project_id", "")).strip()
+    if tenant_id and tenant_id != context.principal.tenant_id:
+        return False
+    if workspace_id and workspace_id != context.principal.workspace_id:
+        return False
+    if project_id and project_id != context.principal.project_id:
+        return False
+    return True
+
+
 class MemoryQueryRepository:
     """Memory Query Repository。
 
@@ -147,7 +264,11 @@ class MemoryQueryRepository:
     - 接 dashboard 的分页查询实现。
     """
 
-    def list_memories(self, query: MemoryQuery) -> tuple[list[dict[str, Any]], str, str]:
+    def list_memories(
+        self,
+        query: MemoryQuery,
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
         try:
             store = _configured_store()
             records = store.list_records(MAX_MEMORY_RECORDS)
@@ -159,37 +280,49 @@ class MemoryQueryRepository:
             backend = store.backend_name
             error = str(exc)
 
-        filtered = [
-            _safe_record(record, include_sensitive=query.include_sensitive)
+        visible_records = [
+            record
             for record in records
-            if _matches_memory_query(record, query)
+            if _record_visible_to_api_context(record, context)
+            and _matches_memory_query(record, query)
         ]
         for record in records:
-            if _matches_memory_query(record, query):
+            if _record_visible_to_api_context(record, context) and _matches_memory_query(
+                record, query
+            ):
                 _audit_sensitive_api_access(
                     record,
                     include_sensitive=query.include_sensitive,
+                    context=context,
                 )
-        return filtered[: query.limit], backend, error
+        filtered = [
+            _safe_record(record, include_sensitive=query.include_sensitive)
+            for record in visible_records
+        ]
+        page_items, page = _paginate(filtered, limit=query.limit, cursor=query.cursor)
+        return RepositoryResult(page_items, backend, error, page)
 
     def get_memory(
         self,
         memory_id: str,
         *,
         include_sensitive: bool,
-    ) -> tuple[dict[str, Any] | None, str, str]:
-        records, backend, error = self.list_memories(
-            MemoryQuery(limit=MAX_MEMORY_RECORDS, include_sensitive=include_sensitive)
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
+        result = self.list_memories(
+            MemoryQuery(limit=MAX_MEMORY_RECORDS, include_sensitive=include_sensitive),
+            context,
         )
-        for record in records:
+        for record in result.data:
             if str(record.get("id", "")) == memory_id:
-                return record, backend, error
-        return None, backend, error
+                return RepositoryResult(record, result.backend, result.error)
+        return RepositoryResult(None, result.backend, result.error)
 
     def list_audit_events(
         self,
         query: AuditQuery,
-    ) -> tuple[list[dict[str, Any]], str, str]:
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
         try:
             store = _configured_store()
             if isinstance(store, PostgresMemoryStore):
@@ -209,8 +342,10 @@ class MemoryQueryRepository:
             _safe_event(event, include_sensitive=query.include_sensitive)
             for event in events
             if _matches_audit_query(event, query)
+            and _audit_event_visible_to_context(event, context)
         ]
-        return filtered[: query.limit], backend, error
+        page_items, page = _paginate(filtered, limit=query.limit, cursor=query.cursor)
+        return RepositoryResult(page_items, backend, error, page)
 
     def _postgres_audit_events(
         self,
@@ -251,33 +386,41 @@ class MemoryQueryRepository:
         memory_id: str,
         *,
         include_sensitive: bool,
-    ) -> tuple[dict[str, Any] | None, str, str]:
-        record, backend, error = self.get_memory(
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
+        record_result = self.get_memory(
             memory_id,
             include_sensitive=include_sensitive,
+            context=context,
         )
-        events, audit_backend, audit_error = self.list_audit_events(
+        audit_result = self.list_audit_events(
             AuditQuery(
                 memory_id=memory_id,
                 include_sensitive=include_sensitive,
                 limit=200,
-            )
+            ),
+            context,
         )
+        record = record_result.data
         if record is None:
-            return None, backend, error or audit_error
+            return RepositoryResult(
+                None,
+                record_result.backend,
+                record_result.error or audit_result.error,
+            )
         metadata = _metadata(record)
-        return (
+        return RepositoryResult(
             {
                 "memory": record,
                 "memory_policy": metadata.get("memory_policy", {}),
                 "quality": metadata.get("memory_quality_evaluation", {}),
                 "failure_memory": metadata.get("failure_memory", {}),
                 "preference_memory": metadata.get("preference_memory", {}),
-                "audit_events": events,
-                "audit_backend": audit_backend,
+                "audit_events": audit_result.data,
+                "audit_backend": audit_result.backend,
             },
-            backend,
-            error or audit_error,
+            record_result.backend,
+            record_result.error or audit_result.error,
         )
 
     def usage(
@@ -285,10 +428,13 @@ class MemoryQueryRepository:
         memory_id: str,
         *,
         include_sensitive: bool,
-    ) -> tuple[dict[str, Any], str, str]:
-        events, backend, error = self.list_audit_events(
-            AuditQuery(limit=MAX_MEMORY_AUDIT_EVENTS, include_sensitive=include_sensitive)
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
+        result = self.list_audit_events(
+            AuditQuery(limit=MAX_MEMORY_AUDIT_EVENTS, include_sensitive=include_sensitive),
+            context,
         )
+        events = result.data
         used_by = [
             event
             for event in events
@@ -297,14 +443,14 @@ class MemoryQueryRepository:
         direct_events = [
             event for event in events if str(event.get("memory_id", "")) == memory_id
         ]
-        return (
+        return RepositoryResult(
             {
                 "memory_id": memory_id,
                 "direct_events": direct_events,
                 "used_by_events": used_by,
             },
-            backend,
-            error,
+            result.backend,
+            result.error,
         )
 
     def feedback(
@@ -312,7 +458,7 @@ class MemoryQueryRepository:
         memory_id: str | None,
         *,
         limit: int,
-    ) -> tuple[dict[str, Any], str, str]:
+    ) -> RepositoryResult:
         """查询人工/系统反馈。
 
         中文注释：
@@ -328,47 +474,60 @@ class MemoryQueryRepository:
                 if str(event.get("memory_id", "")) == memory_id
             ]
         summary = feedback_summary_for_memory(memory_id) if memory_id else {}
-        return {
-            "memory_id": memory_id or "",
-            "summary": summary,
-            "events": events[:limit],
-        }, "jsonl-feedback", ""
+        return RepositoryResult(
+            {
+                "memory_id": memory_id or "",
+                "summary": summary,
+                "events": events[:limit],
+            },
+            "jsonl-feedback",
+        )
 
-    def eval_cases(self, *, limit: int) -> tuple[list[dict[str, Any]], str, str]:
+    def eval_cases(self, *, limit: int) -> RepositoryResult:
         """查询离线 memory eval cases。"""
 
-        return read_memory_eval_cases(limit), "jsonl-eval-cases", ""
+        return RepositoryResult(read_memory_eval_cases(limit), "jsonl-eval-cases")
 
-    def rerank_telemetry(self, *, limit: int) -> tuple[dict[str, Any], str, str]:
+    def rerank_telemetry(self, *, limit: int) -> RepositoryResult:
         """查询 rerank telemetry 和 A/B bucket 统计。"""
 
-        return {
-            "summary": summarize_rerank_telemetry(limit),
-            "events": read_rerank_telemetry(limit),
-        }, "jsonl-rerank-telemetry", ""
+        return RepositoryResult(
+            {
+                "summary": summarize_rerank_telemetry(limit),
+                "events": read_rerank_telemetry(limit),
+            },
+            "jsonl-rerank-telemetry",
+        )
 
     def contradiction_evolution(
         self,
         contradiction_key: str,
         *,
         include_sensitive: bool,
-    ) -> tuple[list[dict[str, Any]], str, str]:
-        records, backend, error = self.list_memories(
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
+        result = self.list_memories(
             MemoryQuery(
                 contradiction_key=contradiction_key,
                 include_sensitive=include_sensitive,
                 limit=MAX_MEMORY_RECORDS,
-            )
+            ),
+            context,
         )
+        records = result.data
         records.sort(key=lambda record: str(record.get("created_at", "")))
-        return records, backend, error
+        return RepositoryResult(records, result.backend, result.error)
 
-    def run_lineage(self, run_id: str) -> tuple[dict[str, Any], str, str]:
+    def run_lineage(self, run_id: str) -> RepositoryResult:
         """查询某次 run 的 lineage 报告。"""
 
         data = lineage_for_run_id(run_id)
         audit = data.get("audit", {}) if isinstance(data, dict) else {}
-        return data, str(audit.get("backend", "")), str(audit.get("backend_error", ""))
+        return RepositoryResult(
+            data,
+            str(audit.get("backend", "")),
+            str(audit.get("backend_error", "")),
+        )
 
     def failure_patterns(
         self,
@@ -376,7 +535,8 @@ class MemoryQueryRepository:
         limit: int,
         category: str | None,
         pattern_id: str | None,
-    ) -> tuple[list[dict[str, Any]], str, str]:
+        context: ApiRequestContext,
+    ) -> RepositoryResult:
         """按失败模式聚合 failure memory。
 
         中文注释：
@@ -387,13 +547,15 @@ class MemoryQueryRepository:
         所以这里把底层 memory records 聚合成 dashboard 更容易展示的 pattern。
         """
 
-        records, backend, error = self.list_memories(
+        result = self.list_memories(
             MemoryQuery(
                 limit=MAX_MEMORY_RECORDS,
                 failure_category=category,
                 failure_pattern_id=pattern_id,
-            )
+            ),
+            context,
         )
+        records = result.data
         patterns: dict[str, dict[str, Any]] = {}
         for record in records:
             failure = _failure_memory(record)
@@ -435,4 +597,4 @@ class MemoryQueryRepository:
             key=lambda item: (int(item["count"]), str(item["latest_at"])),
             reverse=True,
         )
-        return grouped[:limit], backend, error
+        return RepositoryResult(grouped[:limit], result.backend, result.error)
