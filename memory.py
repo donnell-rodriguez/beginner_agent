@@ -18,6 +18,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MemoryKind = Literal["task", "failure", "patch", "project", "user", "tool", "eval"]
 MemoryScope = Literal["global", "user", "project", "thread", "task", "tool", "file"]
+MemoryVisibility = Literal[
+    "private",
+    "project",
+    "workspace",
+    "tenant",
+    "public",
+    "retrieval_only",
+]
+SensitivityLevel = Literal["public", "internal", "confidential", "secret"]
 RetentionPolicy = Literal["none", "session", "ttl", "long_term", "pinned"]
 ValidityStatus = Literal["active", "superseded", "deprecated", "disputed", "rejected"]
 MemoryPolicyAction = Literal["store", "discard"]
@@ -44,6 +53,10 @@ MAX_MEMORY_TEXT_CHARS = 2000
 DEFAULT_MEMORY_TTL_DAYS = 30
 DEFAULT_MEMORY_BACKEND = "postgres"
 MEMORY_PROMOTION_SUCCESS_THRESHOLD = 3
+DEFAULT_TENANT_ID = "local-tenant"
+DEFAULT_WORKSPACE_ID = "local-workspace"
+DEFAULT_PROJECT_ID = "beginner_agent"
+DEFAULT_USER_ID = "local-user"
 SENSITIVE_FIELD_NAMES = {
     "api_key",
     "authorization",
@@ -196,6 +209,12 @@ class MemoryRecord(BaseModel):
     confidence: float = 0.7
     importance: float = 0.5
     scope: MemoryScope = "project"
+    visibility: MemoryVisibility = "project"
+    sensitivity_level: SensitivityLevel = "internal"
+    tenant_id: str = DEFAULT_TENANT_ID
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    project_id: str = DEFAULT_PROJECT_ID
+    user_id: str = DEFAULT_USER_ID
     retention_policy: RetentionPolicy = "ttl"
     validity_status: ValidityStatus = "active"
     pinned: bool = False
@@ -414,6 +433,12 @@ class PostgresMemoryStore:
                     confidence DOUBLE PRECISION NOT NULL,
                     importance DOUBLE PRECISION NOT NULL DEFAULT 0.5,
                     scope TEXT NOT NULL DEFAULT 'project',
+                    visibility TEXT NOT NULL DEFAULT 'project',
+                    sensitivity_level TEXT NOT NULL DEFAULT 'internal',
+                    tenant_id TEXT NOT NULL DEFAULT 'local-tenant',
+                    workspace_id TEXT NOT NULL DEFAULT 'local-workspace',
+                    project_id TEXT NOT NULL DEFAULT 'beginner_agent',
+                    user_id TEXT NOT NULL DEFAULT 'local-user',
                     retention_policy TEXT NOT NULL DEFAULT 'ttl',
                     validity_status TEXT NOT NULL DEFAULT 'active',
                     pinned BOOLEAN NOT NULL DEFAULT FALSE,
@@ -449,6 +474,42 @@ class PostgresMemoryStore:
                 """
                 ALTER TABLE beginner_agent_memory
                 ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'project'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'project'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS sensitivity_level TEXT NOT NULL DEFAULT 'internal'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'local-tenant'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'local-workspace'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT 'beginner_agent'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'local-user'
                 """
             )
             conn.execute(
@@ -516,6 +577,15 @@ class PostgresMemoryStore:
                 CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_governance
                 ON beginner_agent_memory (
                     validity_status, retention_policy, scope, pinned, expires_at
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_acl
+                ON beginner_agent_memory (
+                    tenant_id, workspace_id, project_id, user_id,
+                    visibility, sensitivity_level
                 )
                 """
             )
@@ -619,8 +689,9 @@ class PostgresMemoryStore:
                 SELECT id, kind, task_id, title, summary, status, tool_name,
                        tool_result_status, paths, tags, confidence, source,
                        created_at::text, metadata, importance, scope,
-                       retention_policy, validity_status, pinned,
-                       expires_at::text, supersedes, contradiction_key
+                       visibility, sensitivity_level, tenant_id, workspace_id,
+                       project_id, user_id, retention_policy, validity_status,
+                       pinned, expires_at::text, supersedes, contradiction_key
                 FROM beginner_agent_memory
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -647,12 +718,18 @@ class PostgresMemoryStore:
                     "metadata": row[13],
                     "importance": row[14],
                     "scope": row[15],
-                    "retention_policy": row[16],
-                    "validity_status": row[17],
-                    "pinned": row[18],
-                    "expires_at": row[19],
-                    "supersedes": row[20],
-                    "contradiction_key": row[21],
+                    "visibility": row[16],
+                    "sensitivity_level": row[17],
+                    "tenant_id": row[18],
+                    "workspace_id": row[19],
+                    "project_id": row[20],
+                    "user_id": row[21],
+                    "retention_policy": row[22],
+                    "validity_status": row[23],
+                    "pinned": row[24],
+                    "expires_at": row[25],
+                    "supersedes": row[26],
+                    "contradiction_key": row[27],
                 }
             )
         return records
@@ -695,17 +772,22 @@ class PostgresMemoryStore:
                 INSERT INTO beginner_agent_memory (
                     id, kind, task_id, title, summary, status, tool_name,
                     tool_result_status, paths, tags, confidence, importance,
-                    scope, retention_policy, validity_status, pinned, expires_at,
-                    supersedes, contradiction_key, source, created_at, metadata
+                    scope, visibility, sensitivity_level, tenant_id, workspace_id,
+                    project_id, user_id, retention_policy, validity_status, pinned,
+                    expires_at, supersedes, contradiction_key, source, created_at,
+                    metadata
                 )
                 VALUES (
                     %(id)s, %(kind)s, %(task_id)s, %(title)s, %(summary)s,
                     %(status)s, %(tool_name)s, %(tool_result_status)s,
                     %(paths)s::jsonb, %(tags)s::jsonb, %(confidence)s,
-                    %(importance)s, %(scope)s, %(retention_policy)s,
-                    %(validity_status)s, %(pinned)s, %(expires_at)s::timestamptz,
-                    %(supersedes)s, %(contradiction_key)s, %(source)s,
-                    %(created_at)s::timestamptz, %(metadata)s::jsonb
+                    %(importance)s, %(scope)s, %(visibility)s,
+                    %(sensitivity_level)s, %(tenant_id)s, %(workspace_id)s,
+                    %(project_id)s, %(user_id)s, %(retention_policy)s,
+                    %(validity_status)s, %(pinned)s,
+                    %(expires_at)s::timestamptz, %(supersedes)s,
+                    %(contradiction_key)s, %(source)s, %(created_at)s::timestamptz,
+                    %(metadata)s::jsonb
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     kind = EXCLUDED.kind,
@@ -720,6 +802,12 @@ class PostgresMemoryStore:
                     confidence = EXCLUDED.confidence,
                     importance = EXCLUDED.importance,
                     scope = EXCLUDED.scope,
+                    visibility = EXCLUDED.visibility,
+                    sensitivity_level = EXCLUDED.sensitivity_level,
+                    tenant_id = EXCLUDED.tenant_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    project_id = EXCLUDED.project_id,
+                    user_id = EXCLUDED.user_id,
                     retention_policy = EXCLUDED.retention_policy,
                     validity_status = EXCLUDED.validity_status,
                     pinned = EXCLUDED.pinned,
@@ -810,9 +898,10 @@ class PostgresMemoryStore:
                 SELECT m.id, m.kind, m.task_id, m.title, m.summary, m.status,
                        m.tool_name, m.tool_result_status, m.paths, m.tags,
                        m.confidence, m.source, m.created_at::text, m.metadata,
-                       m.importance, m.scope, m.retention_policy,
-                       m.validity_status, m.pinned, m.expires_at::text,
-                       m.supersedes, m.contradiction_key,
+                       m.importance, m.scope, m.visibility, m.sensitivity_level,
+                       m.tenant_id, m.workspace_id, m.project_id, m.user_id,
+                       m.retention_policy, m.validity_status, m.pinned,
+                       m.expires_at::text, m.supersedes, m.contradiction_key,
                        e.embedding <=> %(query_embedding)s::vector AS distance,
                        e.embedding_provider, e.embedding_model
                 FROM {table_name} e
@@ -855,15 +944,21 @@ class PostgresMemoryStore:
                     "metadata": row[13],
                     "importance": row[14],
                     "scope": row[15],
-                    "retention_policy": row[16],
-                    "validity_status": row[17],
-                    "pinned": row[18],
-                    "expires_at": row[19],
-                    "supersedes": row[20],
-                    "contradiction_key": row[21],
-                    "vector_distance": float(row[22]),
-                    "embedding_provider": row[23],
-                    "embedding_model": row[24],
+                    "visibility": row[16],
+                    "sensitivity_level": row[17],
+                    "tenant_id": row[18],
+                    "workspace_id": row[19],
+                    "project_id": row[20],
+                    "user_id": row[21],
+                    "retention_policy": row[22],
+                    "validity_status": row[23],
+                    "pinned": row[24],
+                    "expires_at": row[25],
+                    "supersedes": row[26],
+                    "contradiction_key": row[27],
+                    "vector_distance": float(row[28]),
+                    "embedding_provider": row[29],
+                    "embedding_model": row[30],
                 }
             )
         return records
@@ -892,6 +987,11 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
             f"tool: {record.tool_name}",
             f"tool_result_status: {record.tool_result_status}",
             f"scope: {record.scope}",
+            f"visibility: {record.visibility}",
+            f"sensitivity_level: {record.sensitivity_level}",
+            f"tenant_id: {record.tenant_id}",
+            f"workspace_id: {record.workspace_id}",
+            f"project_id: {record.project_id}",
             f"retention_policy: {record.retention_policy}",
             f"validity_status: {record.validity_status}",
             f"importance: {record.importance}",
@@ -976,6 +1076,62 @@ def _record_created_at(record: dict[str, Any]) -> datetime:
     )
 
 
+def _access_value_from_state_or_env(
+    state: State,
+    state_key: str,
+    env_key: str,
+    default: str,
+) -> str:
+    """从 State 或环境变量读取访问控制身份。"""
+
+    value = state.get(state_key)
+    if value:
+        return str(value)
+    return os.getenv(env_key, default).strip() or default
+
+
+def _memory_access_context(state: State) -> dict[str, str]:
+    """构造当前请求的 memory access context。
+
+    中文注释：
+    大厂级 memory 不会只问“语义相似吗”，还会先问：
+    - 当前用户是谁？
+    - 当前项目是谁？
+    - 当前 workspace / tenant 是谁？
+
+    这些身份字段用于隔离不同用户、不同项目、不同组织的记忆。
+    """
+
+    return {
+        "tenant_id": _access_value_from_state_or_env(
+            state, "tenant_id", "BEGINNER_AGENT_TENANT_ID", DEFAULT_TENANT_ID
+        ),
+        "workspace_id": _access_value_from_state_or_env(
+            state,
+            "workspace_id",
+            "BEGINNER_AGENT_WORKSPACE_ID",
+            DEFAULT_WORKSPACE_ID,
+        ),
+        "project_id": _access_value_from_state_or_env(
+            state, "project_id", "BEGINNER_AGENT_PROJECT_ID", DEFAULT_PROJECT_ID
+        ),
+        "user_id": _access_value_from_state_or_env(
+            state, "user_id", "BEGINNER_AGENT_USER_ID", DEFAULT_USER_ID
+        ),
+    }
+
+
+def _record_acl_identity(record: dict[str, Any]) -> dict[str, str]:
+    """读取记录里的 ACL 身份字段，兼容旧记录默认值。"""
+
+    return {
+        "tenant_id": str(record.get("tenant_id") or DEFAULT_TENANT_ID),
+        "workspace_id": str(record.get("workspace_id") or DEFAULT_WORKSPACE_ID),
+        "project_id": str(record.get("project_id") or DEFAULT_PROJECT_ID),
+        "user_id": str(record.get("user_id") or DEFAULT_USER_ID),
+    }
+
+
 def _dedupe_contradiction_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """同 contradiction_key 只保留最新 active 记忆。
 
@@ -1003,35 +1159,13 @@ def _dedupe_contradiction_records(records: list[dict[str, Any]]) -> list[dict[st
 
 
 def _scope_matches_state(record: dict[str, Any], state: State) -> bool:
-    """判断记忆 scope 是否适合当前任务。"""
+    """判断记忆 scope 是否适合当前任务。
 
-    # 后续 TODO：Memory Scope Intelligence
-    #
-    # 中文注释：
-    # 当前函数只做“硬规则过滤”，它适合守住安全边界：
-    # - global / user / project 级记忆可以进入候选池。
-    # - task 级记忆只能匹配当前 task_id。
-    # - tool 级记忆只能匹配当前工具。
-    # - file 级记忆只能匹配当前文件路径。
-    #
-    # 更接近大厂风格的下一步，不是把这里直接替换成 LLM 判断，
-    # 而是在硬过滤之后增加单独的智能层：
-    #
-    # 1. MemoryReranker
-    #    对已经通过 scope 硬过滤的候选记忆重新排序。
-    #
-    # 2. MemoryRelevanceJudge
-    #    用 LLM / reranker / cross-encoder 判断记忆是否真的有帮助。
-    #
-    # 3. MemoryUsageAudit
-    #    记录“哪条记忆影响了哪个 Planner / Evaluator 决策”。
-    #
-    # 4. MemoryAccessPolicy
-    #    对敏感 scope 做更严格权限控制，例如 user / file / thread。
-    #
-    # 原则：
-    #   这个函数继续保持简单、稳定、可解释；
-    #   智能判断放到后面的 reranker / judge / audit 层。
+    中文注释：
+    scope 只回答“这条记忆在任务语义边界上是否适合”。
+    真正的用户/项目/租户权限由 _record_visible_to_context(...) 判断。
+    """
+
     scope = str(record.get("scope", "project"))
     if scope in {"global", "user", "project"}:
         return True
@@ -1047,6 +1181,76 @@ def _scope_matches_state(record: dict[str, Any], state: State) -> bool:
     if scope == "thread":
         return True
     return False
+
+
+def _record_visible_to_context(record: dict[str, Any], state: State) -> bool:
+    """判断当前请求是否有权检索这条 memory。
+
+    中文注释：
+    这是 Memory Access Control 的核心硬规则。
+    它不使用 LLM，因为权限边界必须稳定、可解释、可审计。
+    """
+
+    visibility = str(record.get("visibility", "project"))
+    context = _memory_access_context(state)
+    identity = _record_acl_identity(record)
+
+    if visibility == "public":
+        return True
+    if visibility == "tenant":
+        return identity["tenant_id"] == context["tenant_id"]
+    if visibility == "workspace":
+        return (
+            identity["tenant_id"] == context["tenant_id"]
+            and identity["workspace_id"] == context["workspace_id"]
+        )
+    if visibility in {"project", "retrieval_only"}:
+        return (
+            identity["tenant_id"] == context["tenant_id"]
+            and identity["workspace_id"] == context["workspace_id"]
+            and identity["project_id"] == context["project_id"]
+        )
+    if visibility == "private":
+        return (
+            identity["tenant_id"] == context["tenant_id"]
+            and identity["workspace_id"] == context["workspace_id"]
+            and identity["project_id"] == context["project_id"]
+            and identity["user_id"] == context["user_id"]
+        )
+    return False
+
+
+def _record_allowed_in_prompt(record: dict[str, Any]) -> bool:
+    """判断 memory 是否允许进入 prompt / memory_context。
+
+    中文注释：
+    有些记忆可以用于检索和审计，但不应该直接进入 prompt。
+    例如：
+    - visibility=retrieval_only
+    - sensitivity_level=confidential / secret
+
+    这样可以避免敏感经验、隐私内容或只供索引用的记录泄露给模型。
+    """
+
+    visibility = str(record.get("visibility", "project"))
+    sensitivity = str(record.get("sensitivity_level", "internal"))
+    if visibility == "retrieval_only":
+        return False
+    return sensitivity in {"public", "internal"}
+
+
+def _record_access_control(record: dict[str, Any], state: State) -> dict[str, Any]:
+    """返回一条 memory 的访问控制判断结果。"""
+
+    visible = _record_visible_to_context(record, state)
+    prompt_allowed = visible and _record_allowed_in_prompt(record)
+    return {
+        "visible": visible,
+        "prompt_allowed": prompt_allowed,
+        "visibility": str(record.get("visibility", "project")),
+        "sensitivity_level": str(record.get("sensitivity_level", "internal")),
+        **_record_acl_identity(record),
+    }
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -1119,6 +1323,66 @@ def _memory_has_success_evidence(pending_memory: dict[str, Any]) -> bool:
     if isinstance(metadata, dict) and any(bool(metadata.get(key)) for key in evidence_keys):
         return True
     return any(bool(pending_memory.get(key)) for key in evidence_keys)
+
+
+def _metadata_value(metadata: dict[str, Any], key: str, default: str) -> str:
+    """从 metadata 读取字符串配置。"""
+
+    value = metadata.get(key)
+    if value:
+        return str(value)
+    return default
+
+
+def _memory_acl_for_pending(
+    state: State,
+    pending_memory: dict[str, Any],
+    *,
+    tool_name: str,
+) -> dict[str, Any]:
+    """为新写入的 memory 生成 ACL 字段。
+
+    中文注释：
+    写入时就把身份和敏感级别固化到 MemoryRecord。
+    这样后续检索时不需要猜“这条记忆属于谁、能不能给当前项目用”。
+    """
+
+    context = _memory_access_context(state)
+    metadata = pending_memory.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    sensitivity: SensitivityLevel = "internal"
+    if tool_name == "secret_scan" or pending_memory.get("sensitivity_level") == "secret":
+        sensitivity = "secret"
+    elif pending_memory.get("sensitivity_level") in {"public", "internal", "confidential"}:
+        sensitivity = pending_memory["sensitivity_level"]
+    elif metadata.get("sensitivity_level") in {"public", "internal", "confidential", "secret"}:
+        sensitivity = metadata["sensitivity_level"]
+
+    visibility: MemoryVisibility = "project"
+    raw_visibility = pending_memory.get("visibility") or metadata.get("visibility")
+    if raw_visibility in {
+        "private",
+        "project",
+        "workspace",
+        "tenant",
+        "public",
+        "retrieval_only",
+    }:
+        visibility = raw_visibility
+    if sensitivity in {"confidential", "secret"} and visibility == "public":
+        visibility = "retrieval_only"
+
+    return {
+        "tenant_id": _metadata_value(metadata, "tenant_id", context["tenant_id"]),
+        "workspace_id": _metadata_value(
+            metadata, "workspace_id", context["workspace_id"]
+        ),
+        "project_id": _metadata_value(metadata, "project_id", context["project_id"]),
+        "user_id": _metadata_value(metadata, "user_id", context["user_id"]),
+        "visibility": visibility,
+        "sensitivity_level": sensitivity,
+    }
 
 
 def _memory_policy_for_pending(
@@ -1303,6 +1567,11 @@ def _stable_memory_id(record: dict[str, Any]) -> str:
             "status": record.get("status", ""),
             "paths": record.get("paths", []),
             "scope": record.get("scope", "project"),
+            "visibility": record.get("visibility", "project"),
+            "tenant_id": record.get("tenant_id", DEFAULT_TENANT_ID),
+            "workspace_id": record.get("workspace_id", DEFAULT_WORKSPACE_ID),
+            "project_id": record.get("project_id", DEFAULT_PROJECT_ID),
+            "user_id": record.get("user_id", DEFAULT_USER_ID),
             "contradiction_key": record.get("contradiction_key"),
         },
         ensure_ascii=False,
@@ -1777,6 +2046,7 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         tool_name=tool_name,
         tool_result_status=tool_result_status,
     )
+    acl = _memory_acl_for_pending(state, pending_memory, tool_name=tool_name)
     summary = _redact_sensitive_text(
         f"{pending_memory.get('title', task.get('title', ''))} | "
         f"decision={pending_memory.get('decision', 'none')} | "
@@ -1790,6 +2060,11 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         "status": status,
         "paths": paths,
         "scope": policy.scope,
+        "visibility": acl["visibility"],
+        "tenant_id": acl["tenant_id"],
+        "workspace_id": acl["workspace_id"],
+        "project_id": acl["project_id"],
+        "user_id": acl["user_id"],
         "contradiction_key": pending_memory.get("contradiction_key"),
     }
     record_id = _stable_memory_id(raw_record)
@@ -1810,6 +2085,12 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         confidence=confidence,
         importance=policy.importance,
         scope=policy.scope,
+        visibility=acl["visibility"],
+        sensitivity_level=acl["sensitivity_level"],
+        tenant_id=acl["tenant_id"],
+        workspace_id=acl["workspace_id"],
+        project_id=acl["project_id"],
+        user_id=acl["user_id"],
         retention_policy=policy.retention_policy,
         validity_status=policy.validity_status,
         pinned=policy.pinned or policy.retention_policy == "pinned",
@@ -1823,6 +2104,7 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
                 "action": policy.action,
                 "reason": policy.reason,
             },
+            "memory_access_control": _safe_memory_value(acl),
             "parent_evaluation": _safe_memory_value(
                 pending_memory.get("parent_evaluation", {})
             ),
@@ -2079,11 +2361,23 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
     records, backend, backend_error = _list_memory_records()
     query_text = _query_text_for_state(state)
     vector_records, vector_backend, vector_error = _search_vector_records(query_text)
-    records = [record for record in records if _scope_matches_state(record, state)]
+    records = [
+        {
+            **record,
+            "access_control": _record_access_control(record, state),
+        }
+        for record in records
+        if _record_visible_to_context(record, state) and _scope_matches_state(record, state)
+    ]
     vector_records = [
-        record
+        {
+            **record,
+            "access_control": _record_access_control(record, state),
+        }
         for record in vector_records
-        if _record_is_active(record) and _scope_matches_state(record, state)
+        if _record_is_active(record)
+        and _record_visible_to_context(record, state)
+        and _scope_matches_state(record, state)
     ]
     vector_records = _dedupe_contradiction_records(vector_records)
     scored = [(record, _score_record(record, state)) for record in records]
@@ -2122,7 +2416,11 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
         key=lambda record: float(record.get("retrieval_score", 0)),
         reverse=True,
     )
-    results = _rerank_memory_candidates(candidates, state)
+    results = [
+        record
+        for record in _rerank_memory_candidates(candidates, state)
+        if record.get("access_control", {}).get("prompt_allowed", False)
+    ]
     errors = "; ".join(error for error in (backend_error, vector_error) if error)
     if vector_records:
         backend = f"{backend}+vector"
@@ -2148,6 +2446,7 @@ def memory_retriever_node(state: State) -> dict[str, object]:
     state_notes = list(state["memory_notes"])[-5:]
     persisted_records, backend, backend_error = _retrieve_relevant_records(state)
     retrieved_ids = [str(record.get("id", "")) for record in persisted_records]
+    access_context = _memory_access_context(state)
     audit_backend, audit_error = _upsert_memory_audit_event(
         _build_audit_event(
             action="retrieve",
@@ -2158,6 +2457,7 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "retrieved_memory_ids": retrieved_ids,
                 "retrieved_count": len(retrieved_ids),
                 "backend_error": backend_error,
+                "access_context": access_context,
             },
         )
     )
@@ -2169,7 +2469,22 @@ def memory_retriever_node(state: State) -> dict[str, object]:
         "audit_error": audit_error,
         "record_schema": memory_record_json_schema(),
         "governance": {
-            "filters": ["active", "not_expired", "scope_matched"],
+            "filters": [
+                "active",
+                "not_expired",
+                "scope_matched",
+                "acl_visible",
+                "prompt_allowed",
+            ],
+            "access_context": access_context,
+            "access_control": [
+                "tenant_id",
+                "workspace_id",
+                "project_id",
+                "user_id",
+                "visibility",
+                "sensitivity_level",
+            ],
             "ranking": [
                 "vector_distance",
                 "rule_score",
