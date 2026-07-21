@@ -13,6 +13,13 @@ from .embeddings import safe_embedding, vector_to_sql
 from .failure_memory import build_failure_memory_profile, failure_rerank_signal
 from .memory_quality import MemoryEvaluator, adjusted_memory_fields
 from .node_utils import goal_progress_snapshot
+from .preference_memory import (
+    default_preference_payloads,
+    is_preference_record,
+    merged_preference_context,
+    preference_metadata_from_pending,
+    preference_rerank_signal,
+)
 from .state import State
 from .tooling.core import STATE_DIR, ensure_state_dirs
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -1032,6 +1039,9 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
     failure_profile = record.metadata.get("failure_memory")
     if not isinstance(failure_profile, dict):
         failure_profile = {}
+    preference = record.metadata.get("preference_memory")
+    if not isinstance(preference, dict):
+        preference = {}
     return "\n".join(
         [
             f"kind: {record.kind}",
@@ -1056,6 +1066,10 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
             f"failure_owner: {failure_profile.get('owner', '')}",
             f"failure_retry_class: {failure_profile.get('retry_class', '')}",
             f"failure_pattern_id: {failure_profile.get('pattern_id', '')}",
+            f"preference_key: {preference.get('key', '')}",
+            f"preference_value: {preference.get('value', '')}",
+            f"preference_scope: {preference.get('scope', '')}",
+            f"preference_category: {preference.get('category', '')}",
             f"paths: {', '.join(record.paths)}",
             f"tags: {', '.join(record.tags)}",
         ]
@@ -1191,6 +1205,135 @@ def _record_acl_identity(record: dict[str, Any]) -> dict[str, str]:
         "project_id": str(record.get("project_id") or DEFAULT_PROJECT_ID),
         "user_id": str(record.get("user_id") or DEFAULT_USER_ID),
     }
+
+
+def _preference_visibility(scope: str) -> str:
+    """根据 preference scope 选择默认可见性。"""
+
+    if scope == "user":
+        return "private"
+    if scope == "workspace":
+        return "workspace"
+    if scope == "global":
+        return "tenant"
+    return "project"
+
+
+def _preference_memory_records_for_context(state: State) -> list[MemoryRecord]:
+    """把默认偏好种子转成 MemoryRecord。
+
+    中文注释：
+    这些是用户已经反复明确过的长期偏好。
+    它们被建模成 MemoryRecord，而不是只写在 prompt / skill 里。
+    这样后续 memory retrieval、审计、覆盖、失效都能统一处理。
+    """
+
+    identity = _memory_access_context(state)
+    records: list[MemoryRecord] = []
+    for payload in default_preference_payloads(identity):
+        preference = payload["preference"]
+        scope = str(preference.get("scope", "project"))
+        visibility = _preference_visibility(scope)
+        records.append(
+            MemoryRecord(
+                id=str(payload["id"]),
+                kind="user" if scope == "user" else "project",
+                task_id="preference-seed",
+                title=f"Preference: {preference['key']}",
+                summary=str(preference["value"]),
+                status="active",
+                tool_name="none",
+                tool_result_status="success",
+                tags=[
+                    "preference",
+                    str(preference.get("category", "")),
+                    str(preference.get("scope", "")),
+                ],
+                confidence=0.95,
+                importance=min(1.0, float(preference.get("priority", 80)) / 100),
+                quality_score=0.9,
+                trust_score=0.95,
+                decay_score=0.0,
+                scope="user" if scope == "user" else "project",
+                visibility=visibility,  # type: ignore[arg-type]
+                sensitivity_level="internal",
+                tenant_id=identity["tenant_id"],
+                workspace_id=identity["workspace_id"],
+                project_id=identity["project_id"],
+                user_id=identity["user_id"],
+                retention_policy="pinned",
+                validity_status="active",
+                pinned=True,
+                expires_at=None,
+                contradiction_key=f"preference:{scope}:{preference['key']}",
+                metadata={
+                    "preference_memory": preference,
+                    "memory_policy": {
+                        "action": "store",
+                        "reason": "默认长期偏好种子。",
+                    },
+                },
+            )
+        )
+    return records
+
+
+def _seed_default_preference_memories(state: State) -> dict[str, Any]:
+    """把默认偏好写入长期 memory store。
+
+    中文注释：
+    这里使用稳定 id。
+    只有缺失或内容变化时才 upsert，避免每次运行都重写 Postgres / pgvector。
+    """
+
+    records = _preference_memory_records_for_context(state)
+    existing_records, list_backend, list_error = _list_memory_records()
+    existing_by_id = {str(record.get("id", "")): record for record in existing_records}
+    written = 0
+    skipped = 0
+    backend = list_backend
+    errors: list[str] = []
+    if list_error:
+        errors.append(list_error)
+    for record in records:
+        existing = existing_by_id.get(record.id)
+        existing_metadata = existing.get("metadata", {}) if existing else {}
+        existing_preference = (
+            existing_metadata.get("preference_memory", {})
+            if isinstance(existing_metadata, dict)
+            else {}
+        )
+        current_preference = record.metadata.get("preference_memory", {})
+        if existing and existing_preference == current_preference:
+            skipped += 1
+            continue
+        backend, error, _ = _upsert_memory_record(record)
+        written += 1
+        if error:
+            errors.append(error)
+    return {
+        "seeded": written,
+        "skipped": skipped,
+        "backend": backend,
+        "errors": errors[:3],
+    }
+
+
+def _preference_records_for_state(state: State) -> tuple[list[dict[str, Any]], str, str]:
+    """读取当前 user/project 可用的偏好记忆。"""
+
+    records, backend, error = _list_memory_records()
+    preferences = [
+        {
+            **record,
+            "access_control": _record_access_control(record, state),
+        }
+        for record in records
+        if is_preference_record(record)
+        and _record_visible_to_context(record, state)
+        and _record_allowed_in_prompt(record)
+    ]
+    return preferences, backend, error
 
 
 def _dedupe_contradiction_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1509,6 +1652,17 @@ def _memory_policy_for_pending(
     #    后续可以接入更强 secret scanner / DLP 策略。
     title = str(pending_memory.get("title", "")).strip()
     reason = str(pending_memory.get("reason", "")).strip()
+    preference = preference_metadata_from_pending(pending_memory)
+    if preference:
+        priority = int(preference.get("priority", 80))
+        return MemoryPolicyDecision(
+            "store",
+            "用户/项目长期偏好需要长期保留。",
+            scope="user" if preference.get("scope") == "user" else "project",
+            retention_policy="pinned",
+            importance=min(1.0, max(0.5, priority / 100)),
+            pinned=True,
+        )
     if not title and not reason:
         return MemoryPolicyDecision("discard", "pending_memory 缺少 title/reason。")
 
@@ -2108,6 +2262,9 @@ def _extract_paths(memory: dict[str, Any]) -> list[str]:
 def _classify_memory_kind(memory: dict[str, Any]) -> MemoryKind:
     """根据任务结果粗略分类记忆类型。"""
 
+    preference = preference_metadata_from_pending(memory)
+    if preference:
+        return "user" if preference.get("scope") == "user" else "project"
     decision = str(memory.get("decision", ""))
     tool_result_status = str(memory.get("tool_result_status", "none"))
     tool_name = str(memory.get("tool_name", "none"))
@@ -2169,15 +2326,26 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         tool_result_status=tool_result_status,
     )
     acl = _memory_acl_for_pending(state, pending_memory, tool_name=tool_name)
+    preference = preference_metadata_from_pending(pending_memory)
+    if preference:
+        acl["visibility"] = _preference_visibility(str(preference.get("scope", "project")))
     summary = _redact_sensitive_text(
-        f"{pending_memory.get('title', task.get('title', ''))} | "
-        f"decision={pending_memory.get('decision', 'none')} | "
-        f"reason={pending_memory.get('reason', '')}"
+        str(preference.get("value", ""))
+        if preference
+        else (
+            f"{pending_memory.get('title', task.get('title', ''))} | "
+            f"decision={pending_memory.get('decision', 'none')} | "
+            f"reason={pending_memory.get('reason', '')}"
+        )
     )[:800]
     raw_record = {
         "kind": _classify_memory_kind({**pending_memory, "tool_name": tool_name}),
         "task_id": task_id,
-        "title": str(pending_memory.get("title") or task.get("title", "")),
+        "title": (
+            f"Preference: {preference['key']}"
+            if preference
+            else str(pending_memory.get("title") or task.get("title", ""))
+        ),
         "tool_name": tool_name,
         "status": status,
         "paths": paths,
@@ -2187,7 +2355,11 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         "workspace_id": acl["workspace_id"],
         "project_id": acl["project_id"],
         "user_id": acl["user_id"],
-        "contradiction_key": pending_memory.get("contradiction_key"),
+        "contradiction_key": (
+            f"preference:{preference.get('scope', 'project')}:{preference['key']}"
+            if preference
+            else pending_memory.get("contradiction_key")
+        ),
     }
     record_id = _stable_memory_id(raw_record)
     confidence = 0.9 if tool_result_status == "success" else 0.65
@@ -2227,6 +2399,7 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
                 "reason": policy.reason,
             },
             "memory_access_control": _safe_memory_value(acl),
+            "preference_memory": _safe_memory_value(preference) if preference else {},
             "parent_evaluation": _safe_memory_value(
                 pending_memory.get("parent_evaluation", {})
             ),
@@ -2315,6 +2488,8 @@ def _record_rerank_text(record: dict[str, Any]) -> str:
     metadata = metadata if isinstance(metadata, dict) else {}
     failure_profile = metadata.get("failure_memory")
     failure_profile = failure_profile if isinstance(failure_profile, dict) else {}
+    preference = metadata.get("preference_memory")
+    preference = preference if isinstance(preference, dict) else {}
     return "\n".join(
         [
             str(record.get("title", "")),
@@ -2326,6 +2501,9 @@ def _record_rerank_text(record: dict[str, Any]) -> str:
             str(failure_profile.get("retry_class", "")),
             str(failure_profile.get("stack_signature", "")),
             str(failure_profile.get("recommendation", "")),
+            str(preference.get("key", "")),
+            str(preference.get("value", "")),
+            str(preference.get("category", "")),
             " ".join(str(tag) for tag in record.get("tags", [])),
             " ".join(str(path) for path in record.get("paths", [])),
         ]
@@ -2454,6 +2632,8 @@ def _rerank_memory_candidates(
         risk = _misleading_risk_score(record, state)
         failure_signal = failure_rerank_signal(record)
         failure_weight = float(failure_signal.get("failure_weight", 0.0))
+        preference_signal = preference_rerank_signal(record)
+        preference_weight = float(preference_signal.get("preference_weight", 0.0))
         pinned = 1.0 if record.get("pinned") else 0.0
 
         score = (
@@ -2464,6 +2644,7 @@ def _rerank_memory_candidates(
             + recency * 0.08
             + path_overlap * 0.07
             + failure_weight * 0.08
+            + preference_weight * 0.07
             + pinned * 0.08
             - risk * 0.20
         )
@@ -2499,6 +2680,7 @@ def _rerank_memory_candidates(
                     "path_overlap": round(path_overlap, 4),
                     "misleading_risk": round(risk, 4),
                     "failure_memory": failure_signal,
+                    "preference_memory": preference_signal,
                     "pinned": bool(record.get("pinned")),
                 },
             }
@@ -2596,10 +2778,18 @@ def memory_retriever_node(state: State) -> dict[str, object]:
     这样 agent 下一次运行时，也能看到之前任务沉淀下来的经验。
     """
 
+    access_context = _memory_access_context(state)
+    preference_seed_report = _seed_default_preference_memories(state)
     state_notes = list(state["memory_notes"])[-5:]
     persisted_records, backend, backend_error = _retrieve_relevant_records(state)
+    preference_records, preference_backend, preference_error = _preference_records_for_state(
+        state
+    )
+    preference_context = merged_preference_context(
+        default_preference_payloads(access_context),
+        preference_records,
+    )
     retrieved_ids = [str(record.get("id", "")) for record in persisted_records]
-    access_context = _memory_access_context(state)
     audit_backend, audit_error = _upsert_memory_audit_event(
         _build_audit_event(
             action="retrieve",
@@ -2611,6 +2801,8 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "retrieved_count": len(retrieved_ids),
                 "backend_error": backend_error,
                 "access_context": access_context,
+                "preference_seed_report": preference_seed_report,
+                "preference_count": preference_context["count"],
             },
         )
     )
@@ -2618,6 +2810,9 @@ def memory_retriever_node(state: State) -> dict[str, object]:
         "source": "state.memory_notes + postgres/pgvector memory with jsonl fallback",
         "backend": backend,
         "backend_error": backend_error,
+        "preference_backend": preference_backend,
+        "preference_error": preference_error,
+        "preference_seed_report": preference_seed_report,
         "audit_backend": audit_backend,
         "audit_error": audit_error,
         "record_schema": memory_record_json_schema(),
@@ -2675,7 +2870,16 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "successful_repair_paths",
                 "non_retryable_or_ask_human",
             ],
+            "long_term_user_preferences": [
+                "default_preference_seed",
+                "persisted_preference_memory",
+                "user_scope_private",
+                "project_scope_project_visible",
+                "priority_sorted",
+                "override_by_key",
+            ],
         },
+        "user_preferences": preference_context,
         "state_note_count": len(state_notes),
         "persisted_match_count": len(persisted_records),
         "recent_notes": state_notes,
@@ -2690,6 +2894,7 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                     "Memory Retriever：读取到 "
                     f"{len(state_notes)} 条短期记忆，"
                     f"{len(persisted_records)} 条相关持久记忆，"
+                    f"{preference_context['count']} 条用户/项目偏好，"
                     f"backend={backend}。"
                 ),
             }

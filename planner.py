@@ -383,6 +383,12 @@ def _normalize_subtasks(data: Any, parent: dict[str, Any], state: State) -> list
 def _llm_plan(task: dict[str, Any], state: State) -> tuple[str, str, list[dict[str, Any]]]:
     """Planner 让 LLM 判断 expand 还是 execute，并在 expand 时生成子任务。"""
 
+    memory_context = state.get("memory_context", {})
+    user_preferences = {}
+    if isinstance(memory_context, dict):
+        user_preferences = memory_context.get("user_preferences", {})
+        if not isinstance(user_preferences, dict):
+            user_preferences = {}
     response = chat_completion(
         [
             {
@@ -443,7 +449,9 @@ def _llm_plan(task: dict[str, Any], state: State) -> tuple[str, str, list[dict[s
                     f"用户目标：{state['user_input']}\n\n"
                     f"当前任务：{json.dumps(task, ensure_ascii=False)}\n\n"
                     f"任务树：{json.dumps(state['task_tree'], ensure_ascii=False)}\n\n"
-                    f"已完成任务：{json.dumps(state['completed_tasks'], ensure_ascii=False)}"
+                    f"已完成任务：{json.dumps(state['completed_tasks'], ensure_ascii=False)}\n\n"
+                    "长期用户/项目偏好："
+                    f"{json.dumps(user_preferences, ensure_ascii=False)[:3000]}"
                 ),
             },
         ],

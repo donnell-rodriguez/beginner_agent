@@ -412,6 +412,11 @@ class State(TypedDict):
     #
     # 它不是长期数据库，只是当前运行 State 里的一段可读上下文。
     # Planner / Evaluator 以后可以参考它，避免重复犯错或重复读取文件。
+    #
+    # 当前 memory_context 里也会包含：
+    # - user_preferences：长期用户/项目偏好。
+    #   例如中文注释、配置进 .env、修改后必须测试、优先大厂风格等。
+    # - relevant_records：和当前任务相关的项目/工具/失败经验。
     memory_context: dict[str, Any]
 
     # 中文注释：
