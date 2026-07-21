@@ -330,6 +330,9 @@ NextAction = Literal[
     # 中文注释：
     # 进入 Memory Writer，把本轮产生的结构化经验写入 memory_notes。
     "memory",
+    # 中文注释：
+    # 进入 Memory Compaction，把重复/相似长期记忆压缩成更稳定的摘要记忆。
+    "compact",
     # 中文注释：进入 Artifact Collector，收集补丁、改动文件和验证产物。
     "artifact",
     # 中文注释：进入 Observability Reporter，汇总运行报告。
@@ -384,6 +387,7 @@ class State(TypedDict):
     # evaluate：进入 Evaluator / Verifier。
     # commit：进入 Task Committer，把评估结论写回任务树和记忆。
     # memory：进入 Memory Writer，保存本轮任务经验。
+    # compact：进入 Memory Compaction，整理长期记忆库。
     # finish：进入最终汇总。
     next_action: NextAction
 
@@ -426,6 +430,23 @@ class State(TypedDict):
     # 因为现在我们把“状态提交”和“记忆写入”拆成两个节点，
     # 这样更接近生产系统里的职责边界。
     pending_memory: dict[str, Any]
+
+    # 中文注释：
+    # memory_compaction_report 保存长期记忆压缩报告。
+    #
+    # 为什么需要这个字段？
+    # 长时间运行后 memory 会越来越多。
+    # 如果每次都检索所有碎片记录，速度会变慢，上下文也会变脏。
+    #
+    # Memory Compaction 会把：
+    # - 多条相似经验合并成规则。
+    # - 多次失败合并成 failure pattern。
+    # - 一个文件的多次修改总结成 file memory。
+    # - 一个项目阶段总结成 project memory。
+    #
+    # 这个 report 用来告诉 Summary / API：
+    # 本轮压缩了多少条、旧记忆归档了多少条、使用哪个 backend。
+    memory_compaction_report: dict[str, Any]
 
     # 中文注释：
     # checkpoint_report 记录当前 LangGraph checkpoint 后端。

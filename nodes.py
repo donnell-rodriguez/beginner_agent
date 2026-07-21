@@ -17,6 +17,10 @@ from .evaluator import (
 from .execution_monitor import execution_monitor_node, route_after_execution_monitor
 from .executor import executor_node
 from .memory import memory_retriever_node, memory_writer_node, route_after_memory_writer
+from .memory_compaction import (
+    memory_compaction_node,
+    route_after_memory_compaction,
+)
 from .plan_validator import plan_validator_node, route_after_plan_validator
 from .planner import planner_decomposer_node, route_after_planner, tool_selector_node
 from .policy import route_after_policy, tool_policy_node
@@ -43,6 +47,7 @@ __all__ = [
     "execution_monitor_node",
     "executor_node",
     "memory_retriever_node",
+    "memory_compaction_node",
     "memory_writer_node",
     "observability_reporter_node",
     "plan_validator_node",
@@ -52,6 +57,7 @@ __all__ = [
     "route_after_evaluator",
     "route_after_execution_monitor",
     "route_after_memory_writer",
+    "route_after_memory_compaction",
     "route_after_observability_reporter",
     "route_after_plan_validator",
     "route_after_planner",

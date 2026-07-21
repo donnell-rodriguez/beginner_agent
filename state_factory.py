@@ -49,6 +49,7 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
         "memory_notes": [],
         "memory_context": {},
         "pending_memory": {},
+        "memory_compaction_report": {},
         "checkpoint_report": {},
         "sandbox_report": {},
         "async_job_report": {},

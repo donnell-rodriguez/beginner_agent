@@ -13,6 +13,7 @@ from .nodes import (
     evaluator_verifier_node,
     executor_node,
     memory_retriever_node,
+    memory_compaction_node,
     memory_writer_node,
     observability_reporter_node,
     plan_validator_node,
@@ -23,6 +24,7 @@ from .nodes import (
     route_after_evaluator,
     route_after_execution_monitor,
     route_after_memory_writer,
+    route_after_memory_compaction,
     route_after_observability_reporter,
     route_after_plan_validator,
     route_after_planner,
@@ -51,6 +53,7 @@ from .state import State
 # 具体智能逻辑不要堆在这里：
 # - router.py 负责任务分类和风险判断。
 # - memory.py 负责轻量记忆读取和写入。
+# - memory_compaction.py 负责压缩长期记忆，避免检索越来越慢。
 # - scheduler.py 负责 agenda / task_tree 调度。
 # - planner.py 负责拆解任务，tool_selector_node 负责选择工具。
 # - plan_validator.py 负责计划质量和工具参数可执行性检查。
@@ -96,6 +99,7 @@ def build_graph():
                 -> Evaluator / Verifier
                 -> Task Committer
                 -> Memory Writer
+                -> Memory Compaction
                 -> Artifact Collector
                 -> Observability Reporter
                 -> Scheduler 或 Code Agent Summary
@@ -147,6 +151,7 @@ def build_graph():
     builder.add_node("evaluator_verifier", evaluator_verifier_node)
     builder.add_node("task_committer", task_committer_node)
     builder.add_node("memory_writer", memory_writer_node)
+    builder.add_node("memory_compaction", memory_compaction_node)
     builder.add_node("artifact_collector", artifact_collector_node)
     builder.add_node("observability_reporter", observability_reporter_node)
     builder.add_node("postgres_checkpoint", postgres_checkpoint_node)
@@ -312,10 +317,26 @@ def build_graph():
     )
 
     # Memory Writer
-    # 把 Task Committer 生成的 pending_memory 写入 memory_notes。
+    # 把 Task Committer 生成的 pending_memory 写入 memory_notes / 长期 memory store。
     builder.add_conditional_edges(
         "memory_writer",
         route_after_memory_writer,
+        {
+            "compact": "memory_compaction",
+            "schedule": "artifact_collector",
+            "finish": "artifact_collector",
+        },
+    )
+
+    # Memory Compaction
+    # 后台治理长期记忆：
+    # - 多条相似经验合并成一条规则。
+    # - 多次失败合并成 failure pattern。
+    # - 一个文件的多次修改总结成 file memory。
+    # - 一个项目阶段总结成 project memory。
+    builder.add_conditional_edges(
+        "memory_compaction",
+        route_after_memory_compaction,
         {
             "schedule": "artifact_collector",
             "finish": "artifact_collector",

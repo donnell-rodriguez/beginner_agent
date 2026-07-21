@@ -44,10 +44,11 @@ MemoryAuditAction = Literal[
     "discard",
     "supersede",
     "promote",
+    "compact",
     "fallback",
     "retrieve",
 ]
-MemoryWriterRoute = Literal["schedule", "finish"]
+MemoryWriterRoute = Literal["schedule", "compact", "finish"]
 
 MEMORY_DIR = STATE_DIR / "memory"
 MEMORY_FILE = MEMORY_DIR / "memory.jsonl"
@@ -145,6 +146,8 @@ SENSITIVE_FIELD_NAMES = {
 #   有证据、可信、会过期。
 # - 增加 Failure Memory Library，把失败模式、错误栈、可重试性、
 #   环境/代码归因、失败后成功修复路径沉淀为结构化经验。
+# - 增加 Memory Compaction，把多条相似经验合并为更少、更稳定的长期记忆，
+#   避免长期运行后检索变慢、上下文变脏。
 #
 # 后续 TODO：
 # - 把当前本地特征 MemoryReranker 增强为 cross-encoder / LLM judge。
@@ -339,6 +342,21 @@ class MemoryStore(Protocol):
     def upsert_record(self, record: MemoryRecord) -> None:
         """插入或更新一条记忆记录。"""
 
+    def mark_records_status(
+        self,
+        memory_ids: list[str],
+        status: ValidityStatus,
+        *,
+        superseded_by: str | None = None,
+    ) -> None:
+        """批量更新记忆状态。
+
+        中文注释：
+        Memory Compaction 会把多条旧记忆合并成一条新记忆。
+        合并后旧记忆不能再作为 active 记忆反复进入检索，
+        所以需要批量标记为 superseded。
+        """
+
     def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
         """语义检索相似记忆。"""
 
@@ -367,6 +385,19 @@ class JsonlMemoryStore:
 
     def upsert_record(self, record: MemoryRecord) -> None:
         _upsert_jsonl_memory_record(record.model_dump(mode="json"))
+
+    def mark_records_status(
+        self,
+        memory_ids: list[str],
+        status: ValidityStatus,
+        *,
+        superseded_by: str | None = None,
+    ) -> None:
+        _mark_jsonl_records_status(
+            memory_ids,
+            status,
+            superseded_by=superseded_by,
+        )
 
     def search_similar_records(self, query_text: str, limit: int) -> list[dict[str, Any]]:
         return []
@@ -899,6 +930,45 @@ class PostgresMemoryStore:
                     (record.contradiction_key, record.id),
                 )
         self.upsert_embedding(record)
+
+    def mark_records_status(
+        self,
+        memory_ids: list[str],
+        status: ValidityStatus,
+        *,
+        superseded_by: str | None = None,
+    ) -> None:
+        """批量更新 Postgres 里的 memory validity_status。"""
+
+        if not memory_ids:
+            return
+        self._ensure_table()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE beginner_agent_memory
+                SET validity_status = %(status)s,
+                    metadata = jsonb_set(
+                        metadata,
+                        '{compaction}',
+                        COALESCE(metadata->'compaction', '{}'::jsonb)
+                        || %(compaction)s::jsonb,
+                        true
+                    )
+                WHERE id = ANY(%(memory_ids)s)
+                """,
+                {
+                    "status": status,
+                    "memory_ids": memory_ids,
+                    "compaction": json.dumps(
+                        {
+                            "superseded_by": superseded_by,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
 
     def upsert_embedding(self, record: MemoryRecord) -> None:
         """为 MemoryRecord 写入 pgvector embedding。"""
@@ -1941,6 +2011,40 @@ def _upsert_jsonl_memory_record(record: dict[str, Any]) -> None:
             item["validity_status"] = "superseded"
     kept.append(record)
     _write_jsonl_memory_records(kept)
+
+
+def _mark_jsonl_records_status(
+    memory_ids: list[str],
+    status: ValidityStatus,
+    *,
+    superseded_by: str | None = None,
+) -> None:
+    """批量更新 JSONL fallback 里的记忆状态。"""
+
+    if not memory_ids:
+        return
+    memory_id_set = set(memory_ids)
+    records = _read_jsonl_memory_records(MAX_MEMORY_RECORDS)
+    updated_at = datetime.now(timezone.utc).isoformat()
+    for record in records:
+        if str(record.get("id", "")) not in memory_id_set:
+            continue
+        record["validity_status"] = status
+        metadata = record.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        compaction = metadata.get("compaction")
+        if not isinstance(compaction, dict):
+            compaction = {}
+        compaction.update(
+            {
+                "superseded_by": superseded_by,
+                "updated_at": updated_at,
+            }
+        )
+        metadata["compaction"] = compaction
+        record["metadata"] = metadata
+    _write_jsonl_memory_records(records)
 
 
 def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
@@ -2997,6 +3101,8 @@ def memory_writer_node(state: State) -> dict[str, object]:
 def route_after_memory_writer(state: State) -> MemoryWriterRoute:
     """Memory Writer 后的路由。"""
 
+    if os.getenv("BEGINNER_AGENT_MEMORY_COMPACTION_ENABLED", "true").lower() == "true":
+        return "compact"
     if state["done"] or state["next_action"] == "finish":
         return "finish"
     return "schedule"
