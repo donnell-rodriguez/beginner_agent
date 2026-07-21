@@ -181,6 +181,44 @@ MIGRATIONS: tuple[MemoryMigration, ...] = (
         up_sql=("DROP INDEX IF EXISTS idx_beginner_agent_memory_embeddings_vector",),
         down_sql=(),
     ),
+    MemoryMigration(
+        version=5,
+        name="memory_lifecycle_run_history",
+        up_sql=(
+            """
+            CREATE TABLE IF NOT EXISTS beginner_agent_memory_lifecycle_runs (
+                run_id TEXT PRIMARY KEY,
+                run_key TEXT NOT NULL,
+                job_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                max_attempts INTEGER NOT NULL,
+                started_at TIMESTAMPTZ NOT NULL,
+                finished_at TIMESTAMPTZ,
+                locked BOOLEAN NOT NULL DEFAULT FALSE,
+                skipped_reason TEXT NOT NULL DEFAULT '',
+                backend TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                report JSONB NOT NULL DEFAULT '{}'::jsonb,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_lifecycle_runs_key_success
+            ON beginner_agent_memory_lifecycle_runs (job_name, run_key)
+            WHERE status = 'success'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_lifecycle_runs_status
+            ON beginner_agent_memory_lifecycle_runs (job_name, status, started_at DESC)
+            """,
+        ),
+        down_sql=(
+            "DROP INDEX IF EXISTS idx_beginner_agent_memory_lifecycle_runs_status",
+            "DROP INDEX IF EXISTS idx_beginner_agent_memory_lifecycle_runs_key_success",
+            "DROP TABLE IF EXISTS beginner_agent_memory_lifecycle_runs",
+        ),
+    ),
 )
 
 
