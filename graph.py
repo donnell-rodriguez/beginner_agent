@@ -5,6 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from .checkpointing import build_checkpointer
 from .nodes import (
     chat_node,
+    code_agent_summarize_node,
     execution_monitor_node,
     evaluator_verifier_node,
     executor_node,
@@ -28,7 +29,7 @@ from .nodes import (
     router_classifier_node,
     scheduler_node,
     search_node,
-    summarize_node,
+    simple_summarize_node,
     task_committer_node,
     tool_policy_node,
     tool_selector_node,
@@ -51,7 +52,8 @@ from .state import State
 # - executor.py 负责真正执行工具。
 # - execution_monitor.py 负责观察执行是否失败、超预算、空结果或部分结果。
 # - recovery.py 负责决定重试、换方案、重新拆解、人工确认或停止总结。
-# - evaluator.py 负责结果验证，task_committer_node 负责重试、继续拆解、失败恢复和 rollback 安排。
+# - evaluator.py 负责结果验证。
+# - task_committer_node 负责重试、继续拆解、失败恢复和 rollback 安排。
 #
 # 这样 graph.py 保持稳定，其他模块可以独立升级。
 
@@ -60,11 +62,12 @@ def build_graph():
     """组装 beginner_agent 的 LangGraph 主流程。
 
     中文注释：
-    当前图已经不是单纯教学版的“线性流程”，而是一个分层 code agent 主干：
+    当前图已经不是单纯教学版的“线性流程”，
+    而是一个分层 code agent 主干：
 
         START
           -> Router / Classifier
-          -> 简单任务：search / write / chat
+          -> 简单任务：search / write / chat -> Simple Summary
           -> 复杂任务：
                 Memory Retriever
                 Scheduler
@@ -79,7 +82,7 @@ def build_graph():
                 -> Evaluator / Verifier
                 -> Task Committer
                 -> Memory Writer
-                -> Scheduler 或 Summarize
+                -> Scheduler 或 Code Agent Summary
           -> END
 
     注意：
@@ -121,7 +124,10 @@ def build_graph():
     builder.add_node("memory_writer", memory_writer_node)
 
     # 4. 最终汇总节点。
-    builder.add_node("summarize", summarize_node)
+    # 简单任务和复杂 code-agent 任务的汇总信息密度不同，
+    # 所以拆成两个节点。
+    builder.add_node("simple_summarize", simple_summarize_node)
+    builder.add_node("code_agent_summarize", code_agent_summarize_node)
 
     # 入口：所有任务先进入 Router。
     builder.add_edge(START, "router_classifier")
@@ -142,10 +148,10 @@ def build_graph():
     # 复杂任务开始前先读取轻量记忆，后续 Planner/Evaluator 可以参考。
     builder.add_edge("memory_retriever", "scheduler")
 
-    # 简单任务完成后进入统一汇总。
-    builder.add_edge("search", "summarize")
-    builder.add_edge("write", "summarize")
-    builder.add_edge("chat", "summarize")
+    # 简单任务完成后进入简单汇总。
+    builder.add_edge("search", "simple_summarize")
+    builder.add_edge("write", "simple_summarize")
+    builder.add_edge("chat", "simple_summarize")
 
     # Scheduler / Agenda Manager
     # 选择下一个 pending task；没有任务或超出 max_steps 时结束。
@@ -154,7 +160,7 @@ def build_graph():
         route_after_scheduler,
         {
             "plan": "planner_decomposer",
-            "finish": "summarize",
+            "finish": "code_agent_summarize",
         },
     )
 
@@ -253,7 +259,7 @@ def build_graph():
         route_after_task_committer,
         {
             "memory": "memory_writer",
-            "finish": "summarize",
+            "finish": "code_agent_summarize",
         },
     )
 
@@ -264,12 +270,13 @@ def build_graph():
         route_after_memory_writer,
         {
             "schedule": "scheduler",
-            "finish": "summarize",
+            "finish": "code_agent_summarize",
         },
     )
 
     # 汇总结束。
-    builder.add_edge("summarize", END)
+    builder.add_edge("simple_summarize", END)
+    builder.add_edge("code_agent_summarize", END)
 
     # Memory / Checkpoint
     #

@@ -164,5 +164,6 @@ if __name__ == "__main__":
     #   evaluator_verifier_node 验证结果、父任务状态和目标进度
     #   执行后回到 scheduler_node
     #   直到没有 pending 任务，或者达到 max_steps
-    #   summarize_node 汇总 task_tree、memory_notes 和 completed_tasks
+    #   code_agent_summarize_node 汇总完成项、未完成项、修改文件、
+    #   验证结果、恢复建议和风险提示
     run_case("帮我理解 beginner_agent 这个项目结构和执行流程")

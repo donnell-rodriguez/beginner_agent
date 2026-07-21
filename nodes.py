@@ -20,10 +20,17 @@ from .policy import route_after_policy, tool_policy_node
 from .recovery import recovery_planner_node, route_after_recovery_planner
 from .router import route_by_task, router_classifier_node
 from .scheduler import route_after_scheduler, scheduler_node
-from .simple_nodes import chat_node, search_node, summarize_node, write_node
+from .simple_nodes import (
+    chat_node,
+    code_agent_summarize_node,
+    search_node,
+    simple_summarize_node,
+    write_node,
+)
 
 __all__ = [
     "chat_node",
+    "code_agent_summarize_node",
     "evaluator_verifier_node",
     "execution_monitor_node",
     "executor_node",
@@ -47,7 +54,7 @@ __all__ = [
     "recovery_planner_node",
     "scheduler_node",
     "search_node",
-    "summarize_node",
+    "simple_summarize_node",
     "task_committer_node",
     "tool_policy_node",
     "tool_selector_node",
