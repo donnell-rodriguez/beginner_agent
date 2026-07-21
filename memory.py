@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +18,15 @@ from .preference_memory import (
     merged_preference_context,
     preference_metadata_from_pending,
     preference_rerank_signal,
+)
+from .privacy_governance import (
+    memory_prompt_allowed_by_privacy,
+    privacy_metadata,
+    redact_text_for_memory,
+    redact_value_for_memory,
+    scan_value_for_privacy,
+    storage_summary_for_sensitive_memory,
+    stronger_sensitivity,
 )
 from .state import State
 from .tooling.core import STATE_DIR, ensure_state_dirs
@@ -50,6 +58,7 @@ MemoryAuditAction = Literal[
     "contradiction_check",
     "summarize",
     "rebuild_embedding",
+    "sensitive_access",
     "fallback",
     "retrieve",
 ]
@@ -72,17 +81,6 @@ DEFAULT_TENANT_ID = "local-tenant"
 DEFAULT_WORKSPACE_ID = "local-workspace"
 DEFAULT_PROJECT_ID = "beginner_agent"
 DEFAULT_USER_ID = "local-user"
-SENSITIVE_FIELD_NAMES = {
-    "api_key",
-    "authorization",
-    "cookie",
-    "database_url",
-    "password",
-    "secret",
-    "token",
-}
-
-
 # 中文注释：
 # 先把这几个概念分清楚，否则很容易混在一起：
 #
@@ -153,6 +151,8 @@ SENSITIVE_FIELD_NAMES = {
 #   环境/代码归因、失败后成功修复路径沉淀为结构化经验。
 # - 增加 Memory Compaction，把多条相似经验合并为更少、更稳定的长期记忆，
 #   避免长期运行后检索变慢、上下文变脏。
+# - 增加 Privacy Governance，在写入前扫描 secret / PII，
+#   敏感 memory 禁止进入 prompt，secret 只保存 hash/摘要。
 #
 # 后续 TODO：
 # - 把当前本地特征 MemoryReranker 增强为 cross-encoder / LLM judge。
@@ -1563,11 +1563,7 @@ def _record_allowed_in_prompt(record: dict[str, Any]) -> bool:
     这样可以避免敏感经验、隐私内容或只供索引用的记录泄露给模型。
     """
 
-    visibility = str(record.get("visibility", "project"))
-    sensitivity = str(record.get("sensitivity_level", "internal"))
-    if visibility == "retrieval_only":
-        return False
-    return sensitivity in {"public", "internal"}
+    return memory_prompt_allowed_by_privacy(record)
 
 
 def _record_access_control(record: dict[str, Any], state: State) -> dict[str, Any]:
@@ -1584,22 +1580,64 @@ def _record_access_control(record: dict[str, Any], state: State) -> dict[str, An
     }
 
 
+def _audit_sensitive_memory_access(
+    state: State,
+    records: list[dict[str, Any]],
+    *,
+    backend: str,
+) -> None:
+    """审计敏感 memory 的检索访问。
+
+    中文注释：
+    大厂级隐私治理不只关心“有没有脱敏”，还要知道：
+    - 谁访问过敏感记忆。
+    - 是哪个 project/user/thread 触发的访问。
+    - 这条 memory 有没有被允许进入 prompt。
+
+    这里不会记录原始敏感内容，只记录 memory id 和访问控制结果。
+    """
+
+    context = _memory_access_context(state)
+    for record in records:
+        access_control = record.get("access_control", {})
+        sensitivity = str(record.get("sensitivity_level", "internal"))
+        prompt_allowed = bool(access_control.get("prompt_allowed", False))
+        if sensitivity in {"public", "internal"} and prompt_allowed:
+            continue
+        _upsert_memory_audit_event(
+            _build_audit_event(
+                action="sensitive_access",
+                memory_id=str(record.get("id", "")),
+                reason=(
+                    "Memory Retriever 命中敏感或 prompt 禁用记忆，"
+                    "记录访问审计。"
+                ),
+                backend=backend,
+                metadata={
+                    "access_context": context,
+                    "access_control": _safe_memory_value(access_control),
+                    "sensitivity_level": sensitivity,
+                    "prompt_allowed": prompt_allowed,
+                    "retrieval_source": record.get("retrieval_source", ""),
+                    "task_id": state.get("current_task_id", ""),
+                },
+            )
+        )
+
+
 def _redact_sensitive_text(text: str) -> str:
     """对常见敏感片段做轻量脱敏和截断。
 
     中文注释：
-    记忆系统会跨轮次保存内容，所以不能把 api key、token、password
-    这类值原样写进去。这里不追求替代专业 DLP 系统，但至少把常见
-    key=value / key: value 形式的秘密值替换成 [REDACTED]。
+    记忆系统会跨轮次保存内容，所以不能把 api key、token、password、
+    email 这类内容原样写进去。
+    这里统一调用 privacy_governance.py：
+    - secret 会被替换为 redacted fingerprint。
+    - PII 会被替换为 redacted fingerprint。
+    - 原始值不会写入 memory metadata。
     """
 
-    redacted = text
-    for marker in ("api_key", "token", "password", "secret", "authorization"):
-        redacted = re.sub(
-            rf"(?i)({marker})\s*[:=]\s*([^\s,;|]+)",
-            r"\1=[REDACTED]",
-            redacted,
-        )
+    redacted = redact_text_for_memory(text)
     if len(redacted) > MAX_MEMORY_TEXT_CHARS:
         return redacted[:MAX_MEMORY_TEXT_CHARS] + "...[TRUNCATED]"
     return redacted
@@ -1608,19 +1646,7 @@ def _redact_sensitive_text(text: str) -> str:
 def _safe_memory_value(value: Any, *, key: str = "") -> Any:
     """把要写入 memory metadata 的值裁剪成安全版本。"""
 
-    normalized_key = key.lower()
-    if any(name in normalized_key for name in SENSITIVE_FIELD_NAMES):
-        return "[REDACTED]"
-    if isinstance(value, str):
-        return _redact_sensitive_text(value)
-    if isinstance(value, dict):
-        return {
-            str(item_key): _safe_memory_value(item_value, key=str(item_key))
-            for item_key, item_value in value.items()
-        }
-    if isinstance(value, list):
-        return [_safe_memory_value(item) for item in value[:50]]
-    return value
+    return redact_value_for_memory(value, key=key)
 
 
 def _memory_has_success_evidence(pending_memory: dict[str, Any]) -> bool:
@@ -1682,13 +1708,17 @@ def _memory_acl_for_pending(
     metadata = pending_memory.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
-    sensitivity: SensitivityLevel = "internal"
+    privacy_report = scan_value_for_privacy(pending_memory)
+    sensitivity: SensitivityLevel = stronger_sensitivity(
+        "internal",
+        privacy_report.sensitivity_level,
+    )
     if tool_name == "secret_scan" or pending_memory.get("sensitivity_level") == "secret":
         sensitivity = "secret"
     elif pending_memory.get("sensitivity_level") in {"public", "internal", "confidential"}:
-        sensitivity = pending_memory["sensitivity_level"]
+        sensitivity = stronger_sensitivity(sensitivity, pending_memory["sensitivity_level"])
     elif metadata.get("sensitivity_level") in {"public", "internal", "confidential", "secret"}:
-        sensitivity = metadata["sensitivity_level"]
+        sensitivity = stronger_sensitivity(sensitivity, metadata["sensitivity_level"])
 
     visibility: MemoryVisibility = "project"
     raw_visibility = pending_memory.get("visibility") or metadata.get("visibility")
@@ -1701,7 +1731,7 @@ def _memory_acl_for_pending(
         "retrieval_only",
     }:
         visibility = raw_visibility
-    if sensitivity in {"confidential", "secret"} and visibility == "public":
+    if sensitivity in {"confidential", "secret"}:
         visibility = "retrieval_only"
 
     return {
@@ -1713,6 +1743,7 @@ def _memory_acl_for_pending(
         "user_id": _metadata_value(metadata, "user_id", context["user_id"]),
         "visibility": visibility,
         "sensitivity_level": sensitivity,
+        "privacy_governance": privacy_metadata(privacy_report),
     }
 
 
@@ -1774,9 +1805,9 @@ def _memory_policy_for_pending(
     #    更合理的是：规则先过滤明显情况，再让 LLM / reranker
     #    判断“这条记忆是否值得长期保存、是否会误导后续任务”。
     #
-    # 7. DLP / Secret Scanner
-    #    当前是轻量正则脱敏。
-    #    后续可以接入更强 secret scanner / DLP 策略。
+    # 7. Enterprise DLP / Privacy Classifier
+    #    当前已经有统一 secret scanner / PII detector / policy-based redaction。
+    #    后续可以接企业 DLP、数据分级平台、人工审批和跨租户访问审计。
     title = str(pending_memory.get("title", "")).strip()
     reason = str(pending_memory.get("reason", "")).strip()
     preference = preference_metadata_from_pending(pending_memory)
@@ -2490,6 +2521,7 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
     preference = preference_metadata_from_pending(pending_memory)
     if preference:
         acl["visibility"] = _preference_visibility(str(preference.get("scope", "project")))
+    privacy_report = scan_value_for_privacy(pending_memory)
     summary = _redact_sensitive_text(
         str(preference.get("value", ""))
         if preference
@@ -2499,13 +2531,19 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
             f"reason={pending_memory.get('reason', '')}"
         )
     )[:800]
+    safe_title, safe_summary = storage_summary_for_sensitive_memory(
+        title=str(pending_memory.get("title") or task.get("title", "")),
+        summary=summary,
+        report=privacy_report,
+    )
+    summary = safe_summary
     raw_record = {
         "kind": _classify_memory_kind({**pending_memory, "tool_name": tool_name}),
         "task_id": task_id,
         "title": (
             f"Preference: {preference['key']}"
             if preference
-            else str(pending_memory.get("title") or task.get("title", ""))
+            else safe_title
         ),
         "tool_name": tool_name,
         "status": status,
@@ -2560,6 +2598,7 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
                 "reason": policy.reason,
             },
             "memory_access_control": _safe_memory_value(acl),
+            "privacy_governance": privacy_metadata(privacy_report),
             "preference_memory": _safe_memory_value(preference) if preference else {},
             "parent_evaluation": _safe_memory_value(
                 pending_memory.get("parent_evaluation", {})
@@ -2912,9 +2951,11 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
         key=lambda record: float(record.get("retrieval_score", 0)),
         reverse=True,
     )
+    reranked = _rerank_memory_candidates(candidates, state)
+    _audit_sensitive_memory_access(state, reranked, backend=backend)
     results = [
         record
-        for record in _rerank_memory_candidates(candidates, state)
+        for record in reranked
         if record.get("access_control", {}).get("prompt_allowed", False)
     ]
     errors = "; ".join(error for error in (backend_error, vector_error) if error)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from beginner_agent.memory import (
@@ -8,8 +9,10 @@ from beginner_agent.memory import (
     MAX_MEMORY_RECORDS,
     JsonlMemoryStore,
     PostgresMemoryStore,
+    _build_audit_event,
     _configured_store,
     _read_jsonl_audit_events,
+    _upsert_memory_audit_event,
 )
 
 from .models import AuditQuery, MemoryQuery
@@ -55,6 +58,36 @@ def _safe_event(event: dict[str, Any], *, include_sensitive: bool) -> dict[str, 
     ):
         return {**event, "metadata": SENSITIVE_REDACTION}
     return event
+
+
+def _audit_sensitive_api_access(record: dict[str, Any], *, include_sensitive: bool) -> None:
+    """记录 Memory Query API 对敏感记忆的访问。
+
+    中文注释：
+    查询 API 是给人/后台系统看的。
+    如果调用方显式 include_sensitive=true，必须留下审计。
+    这里仍然不写原始敏感内容，只记录 memory id、actor 和敏感级别。
+    """
+
+    sensitivity = str(record.get("sensitivity_level", "internal"))
+    if sensitivity in {"public", "internal"}:
+        return
+    actor_id = os.getenv("BEGINNER_AGENT_MEMORY_API_ACTOR_ID", "local-admin")
+    _upsert_memory_audit_event(
+        _build_audit_event(
+            action="sensitive_access",
+            memory_id=str(record.get("id", "")),
+            reason="Memory Query API 访问敏感记忆。",
+            backend="memory_api",
+            metadata={
+                "actor_id": actor_id,
+                "include_sensitive": include_sensitive,
+                "sensitivity_level": sensitivity,
+                "visibility": record.get("visibility", ""),
+                "source": "memory_query_api",
+            },
+        )
+    )
 
 
 def _paths(record: dict[str, Any]) -> set[str]:
@@ -124,6 +157,12 @@ class MemoryQueryRepository:
             for record in records
             if _matches_memory_query(record, query)
         ]
+        for record in records:
+            if _matches_memory_query(record, query):
+                _audit_sensitive_api_access(
+                    record,
+                    include_sensitive=query.include_sensitive,
+                )
         return filtered[: query.limit], backend, error
 
     def get_memory(
