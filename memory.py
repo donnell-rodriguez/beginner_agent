@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from .embeddings import safe_embedding, vector_to_sql
+from .failure_memory import build_failure_memory_profile, failure_rerank_signal
 from .memory_quality import MemoryEvaluator, adjusted_memory_fields
 from .node_utils import goal_progress_snapshot
 from .state import State
@@ -135,6 +136,8 @@ SENSITIVE_FIELD_NAMES = {
 # - 增加 MemoryEvaluator / MemoryQualityScore / MemoryDecay / MemoryTrustScore，
 #   在写入前评估记忆是否准确、重复、太泛、可执行、
 #   有证据、可信、会过期。
+# - 增加 Failure Memory Library，把失败模式、错误栈、可重试性、
+#   环境/代码归因、失败后成功修复路径沉淀为结构化经验。
 #
 # 后续 TODO：
 # - 把当前本地特征 MemoryReranker 增强为 cross-encoder / LLM judge。
@@ -1026,6 +1029,9 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
     memory embedding 应该索引“经验摘要”，而不是索引所有原始数据。
     """
 
+    failure_profile = record.metadata.get("failure_memory")
+    if not isinstance(failure_profile, dict):
+        failure_profile = {}
     return "\n".join(
         [
             f"kind: {record.kind}",
@@ -1046,6 +1052,10 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
             f"quality_score: {record.quality_score}",
             f"trust_score: {record.trust_score}",
             f"decay_score: {record.decay_score}",
+            f"failure_category: {failure_profile.get('category', '')}",
+            f"failure_owner: {failure_profile.get('owner', '')}",
+            f"failure_retry_class: {failure_profile.get('retry_class', '')}",
+            f"failure_pattern_id: {failure_profile.get('pattern_id', '')}",
             f"paths: {', '.join(record.paths)}",
             f"tags: {', '.join(record.tags)}",
         ]
@@ -1905,6 +1915,37 @@ def _govern_memory_record_before_write(
         )
     )
 
+    failure_profile = build_failure_memory_profile(
+        {
+            **record.model_dump(mode="json"),
+            "metadata": metadata_updates,
+        },
+        existing_records,
+    )
+    if failure_profile:
+        profile = failure_profile.as_dict()
+        metadata_updates["failure_memory"] = profile
+        updates["metadata"] = metadata_updates
+        if failure_profile.retry_class == "repair_required":
+            updates["importance"] = max(float(updates.get("importance", record.importance)), 0.78)
+        if failure_profile.successful_repair_memory_ids:
+            updates["importance"] = max(float(updates.get("importance", record.importance)), 0.88)
+            metadata_updates["failure_memory"]["has_known_successful_repair"] = True
+        events.append(
+            _build_audit_event(
+                action="store",
+                memory_id=record.id,
+                reason=(
+                    "Failure Memory Library 记录失败模式："
+                    f"category={failure_profile.category}, "
+                    f"owner={failure_profile.owner}, "
+                    f"retry_class={failure_profile.retry_class}。"
+                ),
+                backend=backend,
+                metadata=profile,
+            )
+        )
+
     if record.contradiction_key:
         shadowed_ids = [
             str(item.get("id"))
@@ -2270,12 +2311,21 @@ def _rerank_query_text(state: State) -> str:
 def _record_rerank_text(record: dict[str, Any]) -> str:
     """构造 reranker 使用的记忆文本。"""
 
+    metadata = record.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    failure_profile = metadata.get("failure_memory")
+    failure_profile = failure_profile if isinstance(failure_profile, dict) else {}
     return "\n".join(
         [
             str(record.get("title", "")),
             str(record.get("summary", "")),
             str(record.get("tool_name", "")),
             str(record.get("tool_result_status", "")),
+            str(failure_profile.get("category", "")),
+            str(failure_profile.get("owner", "")),
+            str(failure_profile.get("retry_class", "")),
+            str(failure_profile.get("stack_signature", "")),
+            str(failure_profile.get("recommendation", "")),
             " ".join(str(tag) for tag in record.get("tags", [])),
             " ".join(str(path) for path in record.get("paths", [])),
         ]
@@ -2402,6 +2452,8 @@ def _rerank_memory_candidates(
         recency = _recency_score(record)
         path_overlap = _path_overlap_score(record, state)
         risk = _misleading_risk_score(record, state)
+        failure_signal = failure_rerank_signal(record)
+        failure_weight = float(failure_signal.get("failure_weight", 0.0))
         pinned = 1.0 if record.get("pinned") else 0.0
 
         score = (
@@ -2411,6 +2463,7 @@ def _rerank_memory_candidates(
             + reliability * 0.16
             + recency * 0.08
             + path_overlap * 0.07
+            + failure_weight * 0.08
             + pinned * 0.08
             - risk * 0.20
         )
@@ -2445,6 +2498,7 @@ def _rerank_memory_candidates(
                     "recency": round(recency, 4),
                     "path_overlap": round(path_overlap, 4),
                     "misleading_risk": round(risk, 4),
+                    "failure_memory": failure_signal,
                     "pinned": bool(record.get("pinned")),
                 },
             }
@@ -2604,12 +2658,22 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "recency",
                 "path_overlap",
                 "misleading_risk",
+                "failure_memory_signal",
             ],
             "quality_evaluation": [
                 "MemoryEvaluator",
                 "MemoryQualityScore",
                 "MemoryDecay",
                 "MemoryTrustScore",
+            ],
+            "failure_memory_library": [
+                "failure_category",
+                "stack_signature",
+                "retry_class",
+                "failure_owner",
+                "similar_failure_ids",
+                "successful_repair_paths",
+                "non_retryable_or_ask_human",
             ],
         },
         "state_note_count": len(state_notes),
