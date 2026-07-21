@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from .checkpointing import build_checkpointer
 from .nodes import (
     chat_node,
     execution_monitor_node,
@@ -272,14 +272,16 @@ def build_graph():
 
     # Memory / Checkpoint
     #
-    # 当前使用 MemorySaver：
-    # - 适合本地教学和单进程实验。
-    # - 支持 thread_id 级别的中间状态保存。
+    # 当前通过 checkpointing.build_checkpointer() 选择后端：
+    # - memory：适合本地教学和单进程实验。
+    # - postgres：适合本地长任务和进程重启后的状态恢复。
     #
     # beginner_agent 另外还有工具级 checkpoint_save / checkpoint_load，
     # 用于保存 agent 自己的中间资料。
     #
-    # 真实线上服务可以替换为 SqliteSaver / PostgresSaver，
-    # 但那会引入额外生命周期管理和部署依赖，不适合在这个文件里硬编码。
-    checkpointer = MemorySaver()
+    # 注意：
+    # checkpoint 不是 memory.py 里的长期经验库。
+    # checkpoint 保存 LangGraph runtime 状态；
+    # memory.py 保存 agent 可复用的经验和检索记录。
+    checkpointer = build_checkpointer()
     return builder.compile(checkpointer=checkpointer)
