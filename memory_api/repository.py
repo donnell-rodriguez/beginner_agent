@@ -4,16 +4,11 @@ import json
 import os
 from typing import Any
 
-from beginner_agent.memory import (
-    MAX_MEMORY_AUDIT_EVENTS,
-    MAX_MEMORY_RECORDS,
-    JsonlMemoryStore,
-    PostgresMemoryStore,
-    _build_audit_event,
-    _configured_store,
-    _read_jsonl_audit_events,
-    _upsert_memory_audit_event,
-)
+from beginner_agent.memory_audit import _build_audit_event
+from beginner_agent.memory_jsonl_store import JsonlMemoryStore, _read_jsonl_audit_events
+from beginner_agent.memory_postgres_store import PostgresMemoryStore
+from beginner_agent.memory_settings import MAX_MEMORY_AUDIT_EVENTS, MAX_MEMORY_RECORDS
+from beginner_agent.memory_store import _configured_store, _upsert_memory_audit_event
 from beginner_agent.run_lineage import lineage_for_run_id
 
 from .models import AuditQuery, MemoryQuery

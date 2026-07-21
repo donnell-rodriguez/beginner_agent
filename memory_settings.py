@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+from .tooling.core import STATE_DIR
+
+# 中文注释：
+# memory_settings.py 只放 memory 系统的常量配置。
+# 这样 schema、store、retrieval、node 不需要互相复制这些数字。
+
+MEMORY_DIR = STATE_DIR / "memory"
+MEMORY_FILE = MEMORY_DIR / "memory.jsonl"
+MEMORY_AUDIT_FILE = MEMORY_DIR / "memory_audit.jsonl"
+MAX_MEMORY_RECORDS = 500
+MAX_MEMORY_AUDIT_EVENTS = 1000
+MAX_RETRIEVED_RECORDS = 8
+MAX_RERANK_CANDIDATES = 24
+MIN_RERANK_SCORE = 0.25
+MAX_INDEXED_VECTOR_DIMENSION = 2000
+MAX_MEMORY_TEXT_CHARS = 2000
+DEFAULT_MEMORY_TTL_DAYS = 30
+DEFAULT_MEMORY_BACKEND = "postgres"
+MEMORY_PROMOTION_SUCCESS_THRESHOLD = 3
+DEFAULT_TENANT_ID = "local-tenant"
+DEFAULT_WORKSPACE_ID = "local-workspace"
+DEFAULT_PROJECT_ID = "beginner_agent"
+DEFAULT_USER_ID = "local-user"

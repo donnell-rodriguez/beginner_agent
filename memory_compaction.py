@@ -5,22 +5,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from .memory import (
-    DEFAULT_PROJECT_ID,
-    MAX_MEMORY_RECORDS,
-    JsonlMemoryStore,
+from .memory_audit import _build_audit_event
+from .memory_jsonl_store import JsonlMemoryStore
+from .memory_models import (
     MemoryAuditEvent,
     MemoryKind,
     MemoryRecord,
     MemoryScope,
     MemoryStore,
     SensitivityLevel,
-    _build_audit_event,
-    _configured_store,
-    _memory_access_context,
-    _safe_memory_value,
-    _stable_memory_id,
 )
+from .memory_policy import _memory_access_context, _safe_memory_value, _stable_memory_id
+from .memory_settings import DEFAULT_PROJECT_ID, MAX_MEMORY_RECORDS
+from .memory_store import _configured_store
 from .state import State
 
 

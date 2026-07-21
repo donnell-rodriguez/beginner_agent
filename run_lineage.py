@@ -3,13 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .memory import (
-    MAX_MEMORY_AUDIT_EVENTS,
-    JsonlMemoryStore,
-    PostgresMemoryStore,
-    _configured_store,
-    _read_jsonl_audit_events,
-)
+from .memory_jsonl_store import JsonlMemoryStore, _read_jsonl_audit_events
+from .memory_postgres_store import PostgresMemoryStore
+from .memory_settings import MAX_MEMORY_AUDIT_EVENTS
+from .memory_store import _configured_store
 from .observability_store import ObservabilityStore
 from .state import State
 
