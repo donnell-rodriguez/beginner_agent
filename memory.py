@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -15,6 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 MemoryKind = Literal["task", "failure", "patch", "project", "user", "tool", "eval"]
+MemoryScope = Literal["global", "user", "project", "thread", "task", "tool", "file"]
+RetentionPolicy = Literal["none", "session", "ttl", "long_term", "pinned"]
+ValidityStatus = Literal["active", "superseded", "deprecated", "disputed", "rejected"]
+MemoryPolicyAction = Literal["store", "discard"]
 MemoryWriterRoute = Literal["schedule", "finish"]
 
 MEMORY_DIR = STATE_DIR / "memory"
@@ -22,6 +28,17 @@ MEMORY_FILE = MEMORY_DIR / "memory.jsonl"
 MAX_MEMORY_RECORDS = 500
 MAX_RETRIEVED_RECORDS = 8
 MAX_INDEXED_VECTOR_DIMENSION = 2000
+MAX_MEMORY_TEXT_CHARS = 2000
+DEFAULT_MEMORY_TTL_DAYS = 30
+SENSITIVE_FIELD_NAMES = {
+    "api_key",
+    "authorization",
+    "cookie",
+    "database_url",
+    "password",
+    "secret",
+    "token",
+}
 
 
 # 中文注释：
@@ -46,21 +63,17 @@ MAX_INDEXED_VECTOR_DIMENSION = 2000
 #
 # 4. EmbeddingProvider
 #    这是“把文本变成向量”的组件。
-#    向量数据库本身不会理解文本，需要 embedding 模型先把文本转成数字向量。
+#    向量数据库本身不会理解文本。
+#    需要 embedding 模型先把文本转成数字向量。
 #
-# 5. HashEmbeddingProvider
-#    这是本项目默认的测试 embedding。
-#    它不是智能语义模型，但能稳定生成 384 维向量，
-#    用来验证 pgvector 的写入和查询链路。
-#
-# 6. OmlxEmbeddingProvider
-#    如果你的本地 OMLX 后续提供真正的 /v1/embeddings 接口，
-#    并且加载的是 embedding 模型，就可以切换到它。
+# 5. OmlxEmbeddingProvider
+#    当前项目直接使用真正的 embedding 模型。
+#    如果你的本地 OMLX 提供 /v1/embeddings 接口，
+#    并且加载的是 embedding 模型，就可以通过它生成语义向量。
 #
 # 重要：
-#   Qwen3-ASR-1.7B-bf16 是语音识别模型，不是向量数据库，也不是 embedding 模型。
 #   当前本地向量数据库是 Postgres + pgvector。
-#   当前默认向量生成器是 HashEmbeddingProvider。
+#   当前默认向量生成器是 OmlxEmbeddingProvider。
 #
 # 最终运行链路大致是：
 #
@@ -69,6 +82,30 @@ MAX_INDEXED_VECTOR_DIMENSION = 2000
 #      -> Postgres + pgvector 保存向量
 #      -> Memory Retriever 根据当前任务做相似度搜索
 #      -> 找回和当前任务最相关的历史经验
+
+
+# Production Memory Governance
+#
+# 中文注释：
+# 当前 memory.py 已经实现：
+# - Pydantic MemoryRecord。
+# - JSONL fallback。
+# - Postgres 结构化表。
+# - pgvector embedding 表。
+# - 规则分数 + 向量检索的 hybrid retrieval 雏形。
+# - scope / retention_policy / validity_status / importance / pinned。
+# - expires_at 过期过滤。
+# - supersedes 修正关系字段。
+# - MemoryPolicy 写入前决定 store / discard。
+# - 敏感字段和长文本裁剪，避免把密钥或大段日志写进长期记忆。
+#
+# 后续 TODO：
+# - 自动把 supersedes 指向的旧记录标记为 superseded。
+# - 同 contradiction_key 只返回最新 active 记忆。
+# - 增加 MemoryPromotion，把多次成功/人工确认的记忆晋升为 pinned。
+# - 增加 MemoryReranker，用 reranker 或 LLM judge 做最终排序。
+# - 增加 MemoryAudit，记录哪条记忆影响了哪个 Planner/Evaluator 决策。
+# - 增加后台清理任务，定期删除 expires_at 已过期的非 pinned 记忆。
 
 
 def _validate_embedding_dimension(dimension: int) -> None:
@@ -116,6 +153,9 @@ class MemoryRecord(BaseModel):
     - 跟哪些路径相关。
     - 什么时候产生。
     - 是否可信。
+    - 适用范围是什么。
+    - 保留多久。
+    - 当前是否仍然有效。
 
     现在使用 Pydantic，而不是普通 dict / dataclass。
     好处是：
@@ -138,18 +178,48 @@ class MemoryRecord(BaseModel):
     paths: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     confidence: float = 0.7
+    importance: float = 0.5
+    scope: MemoryScope = "project"
+    retention_policy: RetentionPolicy = "ttl"
+    validity_status: ValidityStatus = "active"
+    pinned: bool = False
+    expires_at: str | None = None
+    supersedes: str | None = None
+    contradiction_key: str | None = None
     source: str = "memory_writer_node"
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("confidence")
+    @field_validator("confidence", "importance")
     @classmethod
     def _confidence_between_zero_and_one(cls, value: float) -> float:
-        """限制 confidence 在 0 到 1 之间。"""
+        """限制 confidence / importance 在 0 到 1 之间。"""
 
         if value < 0 or value > 1:
-            raise ValueError("confidence 必须在 0 到 1 之间。")
+            raise ValueError("confidence / importance 必须在 0 到 1 之间。")
         return value
+
+
+@dataclass(frozen=True)
+class MemoryPolicyDecision:
+    """MemoryPolicy 的判断结果。
+
+    中文注释：
+    这层专门回答一个问题：
+
+        pending_memory 到底要不要写入长期记忆？
+
+    它让 Memory Writer 不再“看到 pending_memory 就无脑写入”。
+    """
+
+    action: MemoryPolicyAction
+    reason: str
+    scope: MemoryScope = "project"
+    retention_policy: RetentionPolicy = "ttl"
+    importance: float = 0.5
+    pinned: bool = False
+    expires_at: str | None = None
+    validity_status: ValidityStatus = "active"
 
 
 class MemoryStore(Protocol):
@@ -271,10 +341,66 @@ class PostgresMemoryStore:
                     paths JSONB NOT NULL,
                     tags JSONB NOT NULL,
                     confidence DOUBLE PRECISION NOT NULL,
+                    importance DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                    scope TEXT NOT NULL DEFAULT 'project',
+                    retention_policy TEXT NOT NULL DEFAULT 'ttl',
+                    validity_status TEXT NOT NULL DEFAULT 'active',
+                    pinned BOOLEAN NOT NULL DEFAULT FALSE,
+                    expires_at TIMESTAMPTZ,
+                    supersedes TEXT,
+                    contradiction_key TEXT,
                     source TEXT NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL,
                     metadata JSONB NOT NULL
                 )
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS importance DOUBLE PRECISION NOT NULL DEFAULT 0.5
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'project'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS retention_policy TEXT NOT NULL DEFAULT 'ttl'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS validity_status TEXT NOT NULL DEFAULT 'active'
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT FALSE
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS supersedes TEXT
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS contradiction_key TEXT
                 """
             )
             conn.execute(
@@ -303,6 +429,14 @@ class PostgresMemoryStore:
             )
             conn.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_governance
+                ON beginner_agent_memory (
+                    validity_status, retention_policy, scope, pinned, expires_at
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_tags
                 ON beginner_agent_memory USING GIN (tags)
                 """
@@ -316,7 +450,7 @@ class PostgresMemoryStore:
 
         中文注释：
         pgvector 的 vector 列通常要固定维度，例如 vector(384)、vector(1024)。
-        之前本项目只有 384 维 hash embedding，所以只有一张固定表。
+        之前本项目只有单一固定维度表。
 
         现在你要接 Qwen3-Embedding-8B。
         推荐让它输出 1024 维向量，因此这里改成“按维度分表”：
@@ -380,7 +514,9 @@ class PostgresMemoryStore:
                 """
                 SELECT id, kind, task_id, title, summary, status, tool_name,
                        tool_result_status, paths, tags, confidence, source,
-                       created_at::text, metadata
+                       created_at::text, metadata, importance, scope,
+                       retention_policy, validity_status, pinned,
+                       expires_at::text, supersedes, contradiction_key
                 FROM beginner_agent_memory
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -405,6 +541,14 @@ class PostgresMemoryStore:
                     "source": row[11],
                     "created_at": row[12],
                     "metadata": row[13],
+                    "importance": row[14],
+                    "scope": row[15],
+                    "retention_policy": row[16],
+                    "validity_status": row[17],
+                    "pinned": row[18],
+                    "expires_at": row[19],
+                    "supersedes": row[20],
+                    "contradiction_key": row[21],
                 }
             )
         return records
@@ -417,14 +561,18 @@ class PostgresMemoryStore:
                 """
                 INSERT INTO beginner_agent_memory (
                     id, kind, task_id, title, summary, status, tool_name,
-                    tool_result_status, paths, tags, confidence, source,
-                    created_at, metadata
+                    tool_result_status, paths, tags, confidence, importance,
+                    scope, retention_policy, validity_status, pinned, expires_at,
+                    supersedes, contradiction_key, source, created_at, metadata
                 )
                 VALUES (
                     %(id)s, %(kind)s, %(task_id)s, %(title)s, %(summary)s,
                     %(status)s, %(tool_name)s, %(tool_result_status)s,
                     %(paths)s::jsonb, %(tags)s::jsonb, %(confidence)s,
-                    %(source)s, %(created_at)s::timestamptz, %(metadata)s::jsonb
+                    %(importance)s, %(scope)s, %(retention_policy)s,
+                    %(validity_status)s, %(pinned)s, %(expires_at)s::timestamptz,
+                    %(supersedes)s, %(contradiction_key)s, %(source)s,
+                    %(created_at)s::timestamptz, %(metadata)s::jsonb
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     kind = EXCLUDED.kind,
@@ -437,6 +585,14 @@ class PostgresMemoryStore:
                     paths = EXCLUDED.paths,
                     tags = EXCLUDED.tags,
                     confidence = EXCLUDED.confidence,
+                    importance = EXCLUDED.importance,
+                    scope = EXCLUDED.scope,
+                    retention_policy = EXCLUDED.retention_policy,
+                    validity_status = EXCLUDED.validity_status,
+                    pinned = EXCLUDED.pinned,
+                    expires_at = EXCLUDED.expires_at,
+                    supersedes = EXCLUDED.supersedes,
+                    contradiction_key = EXCLUDED.contradiction_key,
                     source = EXCLUDED.source,
                     created_at = EXCLUDED.created_at,
                     metadata = EXCLUDED.metadata
@@ -501,12 +657,21 @@ class PostgresMemoryStore:
                 SELECT m.id, m.kind, m.task_id, m.title, m.summary, m.status,
                        m.tool_name, m.tool_result_status, m.paths, m.tags,
                        m.confidence, m.source, m.created_at::text, m.metadata,
+                       m.importance, m.scope, m.retention_policy,
+                       m.validity_status, m.pinned, m.expires_at::text,
+                       m.supersedes, m.contradiction_key,
                        e.embedding <=> %(query_embedding)s::vector AS distance,
                        e.embedding_provider, e.embedding_model
                 FROM {table_name} e
                 JOIN beginner_agent_memory m ON m.id = e.memory_id
                 WHERE e.embedding_provider = %(provider)s
                   AND e.embedding_model = %(model)s
+                  AND m.validity_status = 'active'
+                  AND (
+                    m.expires_at IS NULL
+                    OR m.expires_at > NOW()
+                    OR m.pinned = TRUE
+                  )
                 ORDER BY e.embedding <=> %(query_embedding)s::vector
                 LIMIT %(limit)s
                 """,
@@ -535,9 +700,17 @@ class PostgresMemoryStore:
                     "source": row[11],
                     "created_at": row[12],
                     "metadata": row[13],
-                    "vector_distance": float(row[14]),
-                    "embedding_provider": row[15],
-                    "embedding_model": row[16],
+                    "importance": row[14],
+                    "scope": row[15],
+                    "retention_policy": row[16],
+                    "validity_status": row[17],
+                    "pinned": row[18],
+                    "expires_at": row[19],
+                    "supersedes": row[20],
+                    "contradiction_key": row[21],
+                    "vector_distance": float(row[22]),
+                    "embedding_provider": row[23],
+                    "embedding_model": row[24],
                 }
             )
         return records
@@ -565,6 +738,10 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
             f"status: {record.status}",
             f"tool: {record.tool_name}",
             f"tool_result_status: {record.tool_result_status}",
+            f"scope: {record.scope}",
+            f"retention_policy: {record.retention_policy}",
+            f"validity_status: {record.validity_status}",
+            f"importance: {record.importance}",
             f"paths: {', '.join(record.paths)}",
             f"tags: {', '.join(record.tags)}",
         ]
@@ -583,6 +760,178 @@ def _query_text_for_state(state: State) -> str:
             f"tool_result_status: {state.get('tool_result_status', 'none')}",
         ]
     )
+
+
+def _memory_ttl_days() -> int:
+    """读取 TTL 记忆默认保留天数。"""
+
+    raw = os.getenv("BEGINNER_AGENT_MEMORY_TTL_DAYS", str(DEFAULT_MEMORY_TTL_DAYS))
+    try:
+        return max(1, int(raw.strip()))
+    except ValueError:
+        return DEFAULT_MEMORY_TTL_DAYS
+
+
+def _expires_at_for_policy(retention_policy: RetentionPolicy) -> str | None:
+    """根据 retention_policy 计算 expires_at。"""
+
+    if retention_policy in {"none", "session", "long_term", "pinned"}:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(days=_memory_ttl_days())).isoformat()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    """安全解析 ISO datetime。"""
+
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _record_is_active(record: dict[str, Any]) -> bool:
+    """判断记忆是否仍可被默认检索使用。"""
+
+    if str(record.get("validity_status", "active")) != "active":
+        return False
+    if bool(record.get("pinned", False)):
+        return True
+    expires_at = _parse_datetime(record.get("expires_at"))
+    return expires_at is None or expires_at > datetime.now(timezone.utc)
+
+
+def _scope_matches_state(record: dict[str, Any], state: State) -> bool:
+    """判断记忆 scope 是否适合当前任务。"""
+
+    scope = str(record.get("scope", "project"))
+    if scope in {"global", "user", "project"}:
+        return True
+    if scope == "task":
+        return str(record.get("task_id", "")) == state["current_task_id"]
+    if scope == "tool":
+        return str(record.get("tool_name", "")) in {state.get("tool_name", ""), "none"}
+    if scope == "file":
+        current_task = state["task_tree"].get(state["current_task_id"], {})
+        args = current_task.get("args", {}) if isinstance(current_task, dict) else {}
+        current_path = str(args.get("path", "")) if isinstance(args, dict) else ""
+        return bool(current_path and current_path in record.get("paths", []))
+    if scope == "thread":
+        return True
+    return False
+
+
+def _redact_sensitive_text(text: str) -> str:
+    """对常见敏感片段做轻量脱敏和截断。
+
+    中文注释：
+    记忆系统会跨轮次保存内容，所以不能把 api key、token、password
+    这类值原样写进去。这里不追求替代专业 DLP 系统，但至少把常见
+    key=value / key: value 形式的秘密值替换成 [REDACTED]。
+    """
+
+    redacted = text
+    for marker in ("api_key", "token", "password", "secret", "authorization"):
+        redacted = re.sub(
+            rf"(?i)({marker})\s*[:=]\s*([^\s,;|]+)",
+            r"\1=[REDACTED]",
+            redacted,
+        )
+    if len(redacted) > MAX_MEMORY_TEXT_CHARS:
+        return redacted[:MAX_MEMORY_TEXT_CHARS] + "...[TRUNCATED]"
+    return redacted
+
+
+def _safe_memory_value(value: Any, *, key: str = "") -> Any:
+    """把要写入 memory metadata 的值裁剪成安全版本。"""
+
+    normalized_key = key.lower()
+    if any(name in normalized_key for name in SENSITIVE_FIELD_NAMES):
+        return "[REDACTED]"
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {
+            str(item_key): _safe_memory_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_safe_memory_value(item) for item in value[:50]]
+    return value
+
+
+def _memory_policy_for_pending(
+    state: State,
+    pending_memory: dict[str, Any],
+    *,
+    tool_name: str,
+    tool_result_status: str,
+) -> MemoryPolicyDecision:
+    """决定 pending_memory 是否应该写入长期记忆系统。
+
+    中文注释：
+    这是当前版本的 MemoryPolicy：
+    - 明显没有信息量的内容丢弃。
+    - 成功的代码修改/项目结构经验保留更久。
+    - 失败经验默认 ttl，因为它有价值但可能会过期。
+    - secret_scan 相关内容不存原始结果，只允许存摘要。
+    """
+
+    title = str(pending_memory.get("title", "")).strip()
+    reason = str(pending_memory.get("reason", "")).strip()
+    if not title and not reason:
+        return MemoryPolicyDecision("discard", "pending_memory 缺少 title/reason。")
+
+    if tool_name == "none" and tool_result_status == "none":
+        return MemoryPolicyDecision("discard", "没有工具结果，不写入长期记忆。")
+
+    if tool_name == "secret_scan":
+        return MemoryPolicyDecision(
+            "store",
+            "安全扫描结果只保存摘要。",
+            retention_policy="ttl",
+            importance=0.7,
+        )
+
+    if tool_result_status in {"failed", "blocked", "empty"}:
+        return MemoryPolicyDecision(
+            "store",
+            "失败经验可帮助后续恢复，但默认 TTL。",
+            retention_policy="ttl",
+            importance=0.75,
+        )
+
+    if tool_name in {"apply_patch", "apply_patch_plan", "rollback", "revert_file_patch"}:
+        return MemoryPolicyDecision(
+            "store",
+            "代码修改经验需要长期保留。",
+            retention_policy="long_term",
+            importance=0.85,
+        )
+
+    if tool_name in {"read_file", "summarize_file", "inspect_symbol", "inspect_import_graph"}:
+        return MemoryPolicyDecision(
+            "store",
+            "项目理解类记忆按项目 scope 保存。",
+            scope="project",
+            retention_policy="ttl",
+            importance=0.6,
+        )
+
+    if state.get("done") and tool_result_status == "success":
+        return MemoryPolicyDecision(
+            "store",
+            "完成目标的成功经验可长期保留。",
+            retention_policy="long_term",
+            importance=0.8,
+        )
+
+    return MemoryPolicyDecision("store", "默认写入 TTL 记忆。")
 
 
 def _configured_store() -> MemoryStore:
@@ -621,6 +970,8 @@ def _stable_memory_id(record: dict[str, Any]) -> str:
             "tool_name": record.get("tool_name", "none"),
             "status": record.get("status", ""),
             "paths": record.get("paths", []),
+            "scope": record.get("scope", "project"),
+            "contradiction_key": record.get("contradiction_key"),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -685,10 +1036,20 @@ def _list_memory_records() -> tuple[list[dict[str, Any]], str, str]:
 
     store = _configured_store()
     try:
-        return store.list_records(MAX_MEMORY_RECORDS), store.backend_name, ""
+        records = [
+            record
+            for record in store.list_records(MAX_MEMORY_RECORDS)
+            if _record_is_active(record)
+        ]
+        return records, store.backend_name, ""
     except Exception as exc:
         fallback = JsonlMemoryStore()
-        return fallback.list_records(MAX_MEMORY_RECORDS), fallback.backend_name, str(exc)
+        records = [
+            record
+            for record in fallback.list_records(MAX_MEMORY_RECORDS)
+            if _record_is_active(record)
+        ]
+        return records, fallback.backend_name, str(exc)
 
 
 def _search_vector_records(query_text: str) -> tuple[list[dict[str, Any]], str, str]:
@@ -696,7 +1057,8 @@ def _search_vector_records(query_text: str) -> tuple[list[dict[str, Any]], str, 
 
     store = _configured_store()
     try:
-        return store.search_similar_records(query_text, MAX_RETRIEVED_RECORDS), store.backend_name, ""
+        records = store.search_similar_records(query_text, MAX_RETRIEVED_RECORDS)
+        return records, store.backend_name, ""
     except Exception as exc:
         return [], store.backend_name, str(exc)
 
@@ -726,6 +1088,9 @@ def _extract_paths(memory: dict[str, Any]) -> list[str]:
         path = metadata.get("path")
         if path:
             paths.append(str(path))
+    artifact_paths = memory.get("artifact_paths")
+    if isinstance(artifact_paths, list):
+        paths.extend(str(path) for path in artifact_paths)
     return sorted(set(paths))
 
 
@@ -754,7 +1119,11 @@ def _memory_tags(memory: dict[str, Any]) -> list[str]:
         str(memory.get("tool_result_status", "")),
         str(memory.get("tool_name", "")),
     }
-    tags.update(Path(path).suffix.lstrip(".") for path in _extract_paths(memory) if Path(path).suffix)
+    tags.update(
+        Path(path).suffix.lstrip(".")
+        for path in _extract_paths(memory)
+        if Path(path).suffix
+    )
     return sorted(tag for tag in tags if tag and tag != "none")
 
 
@@ -772,7 +1141,9 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         for path in tool_result_data.get("changed_files", [])
         if isinstance(tool_result_data.get("changed_files", []), list)
     ]
-    paths = sorted(set(_extract_paths({**pending_memory, "args": task.get("args", {})}) + changed_files))
+    paths = sorted(
+        set(_extract_paths({**pending_memory, "args": task.get("args", {})}) + changed_files)
+    )
     status = str(task.get("status") or pending_memory.get("decision") or "unknown")
     tool_result_status = str(
         pending_memory.get("tool_result_status")
@@ -780,7 +1151,13 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         or state["tool_result_status"]
         or "none"
     )
-    summary = (
+    policy = _memory_policy_for_pending(
+        state,
+        pending_memory,
+        tool_name=tool_name,
+        tool_result_status=tool_result_status,
+    )
+    summary = _redact_sensitive_text(
         f"{pending_memory.get('title', task.get('title', ''))} | "
         f"decision={pending_memory.get('decision', 'none')} | "
         f"reason={pending_memory.get('reason', '')}"
@@ -792,14 +1169,18 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         "tool_name": tool_name,
         "status": status,
         "paths": paths,
+        "scope": policy.scope,
+        "contradiction_key": pending_memory.get("contradiction_key"),
     }
     record_id = _stable_memory_id(raw_record)
     confidence = 0.9 if tool_result_status == "success" else 0.65
+    if policy.pinned:
+        confidence = max(confidence, 0.95)
     return MemoryRecord(
         id=record_id,
         kind=raw_record["kind"],
         task_id=task_id,
-        title=raw_record["title"],
+        title=_redact_sensitive_text(raw_record["title"])[:200],
         summary=summary,
         status=status,
         tool_name=tool_name,
@@ -807,21 +1188,39 @@ def _build_memory_record(state: State, pending_memory: dict[str, Any]) -> Memory
         paths=paths,
         tags=_memory_tags({**pending_memory, "tool_name": tool_name}),
         confidence=confidence,
+        importance=policy.importance,
+        scope=policy.scope,
+        retention_policy=policy.retention_policy,
+        validity_status=policy.validity_status,
+        pinned=policy.pinned or policy.retention_policy == "pinned",
+        expires_at=policy.expires_at or _expires_at_for_policy(policy.retention_policy),
+        supersedes=str(pending_memory.get("supersedes") or "") or None,
+        contradiction_key=(
+            str(pending_memory.get("contradiction_key") or "") or None
+        ),
         metadata={
-            "parent_evaluation": pending_memory.get("parent_evaluation", {}),
-            "goal_progress": pending_memory.get("goal_progress", {}),
-            "tool_result_data": tool_result_data,
-            "source_memory": pending_memory,
+            "memory_policy": {
+                "action": policy.action,
+                "reason": policy.reason,
+            },
+            "parent_evaluation": _safe_memory_value(
+                pending_memory.get("parent_evaluation", {})
+            ),
+            "goal_progress": _safe_memory_value(pending_memory.get("goal_progress", {})),
+            "tool_result_data": _safe_memory_value(tool_result_data),
+            "source_memory": _safe_memory_value(pending_memory),
         },
     )
-
 
 def _score_record(record: dict[str, Any], state: State) -> int:
     """给一条历史记忆打分，分数越高越相关。
 
     中文注释：
-    这里先用确定性规则，不用 embedding。
-    生产级可以把这个函数替换成向量检索 + rerank。
+    这是 hybrid retrieval 里的“规则打分”部分。
+    它和 pgvector 语义检索一起工作：
+    - 规则分数适合处理路径、工具名、状态、关键词。
+    - 向量检索适合处理“意思相近但词不一样”的经验。
+    - 后续 TODO 里的 reranker 可以在两者之后做最终排序。
     """
 
     query = state["user_input"].lower()
@@ -847,6 +1246,10 @@ def _score_record(record: dict[str, Any], state: State) -> int:
         score += 1
     if record.get("tool_result_status") == "success":
         score += 1
+    if record.get("pinned"):
+        score += 5
+    score += int(float(record.get("importance", 0.5)) * 4)
+    score += int(float(record.get("confidence", 0.7)) * 2)
     return score
 
 
@@ -856,6 +1259,12 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
     records, backend, backend_error = _list_memory_records()
     query_text = _query_text_for_state(state)
     vector_records, vector_backend, vector_error = _search_vector_records(query_text)
+    records = [record for record in records if _scope_matches_state(record, state)]
+    vector_records = [
+        record
+        for record in vector_records
+        if _record_is_active(record) and _scope_matches_state(record, state)
+    ]
     scored = [(record, _score_record(record, state)) for record in records]
     relevant = [item for item in scored if item[1] > 0]
     relevant.sort(key=lambda item: item[1], reverse=True)
@@ -864,20 +1273,26 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
         merged[str(record.get("id", ""))] = {
             **record,
             "retrieval_source": "vector",
-            "retrieval_score": 1.0 - float(record.get("vector_distance", 1.0)),
+            "retrieval_reason": "pgvector 相似度召回。",
+            "retrieval_score": (
+                1.0
+                - float(record.get("vector_distance", 1.0))
+                + float(record.get("importance", 0.5))
+            ),
         }
     for record, score in relevant:
         record_id = str(record.get("id", ""))
         if record_id in merged:
             merged[record_id]["retrieval_source"] = "hybrid"
             merged[record_id]["rule_score"] = score
-            merged[record_id]["retrieval_score"] = float(merged[record_id].get("retrieval_score", 0)) + (
-                score / 10
-            )
+            merged[record_id]["retrieval_reason"] = "规则关键词 + pgvector 混合召回。"
+            previous_score = float(merged[record_id].get("retrieval_score", 0))
+            merged[record_id]["retrieval_score"] = previous_score + (score / 10)
         else:
             merged[record_id] = {
                 **record,
                 "retrieval_source": "rule",
+                "retrieval_reason": "规则关键词召回。",
                 "rule_score": score,
                 "retrieval_score": score / 10,
             }
@@ -899,9 +1314,11 @@ def memory_retriever_node(state: State) -> dict[str, object]:
 
     中文注释：
     升级后这里不只是读 State.memory_notes。
-    它会同时读取：
+    它会同时读取并治理：
     - 当前 State 里的短期记忆。
-    - .agent_state/memory/memory.jsonl 里的持久化记忆。
+    - JSONL / Postgres 里的持久化记忆。
+    - 默认过滤 superseded / rejected / expired 记忆。
+    - 根据 scope、importance、confidence、pinned 做排序。
 
     这样 agent 下一次运行时，也能看到之前任务沉淀下来的经验。
     """
@@ -909,10 +1326,14 @@ def memory_retriever_node(state: State) -> dict[str, object]:
     state_notes = list(state["memory_notes"])[-5:]
     persisted_records, backend, backend_error = _retrieve_relevant_records(state)
     memory_context = {
-        "source": "state.memory_notes + .agent_state/memory/memory.jsonl",
+        "source": "state.memory_notes + governed persistent memory",
         "backend": backend,
         "backend_error": backend_error,
         "record_schema": memory_record_json_schema(),
+        "governance": {
+            "filters": ["active", "not_expired", "scope_matched"],
+            "ranking": ["vector_distance", "rule_score", "importance", "confidence", "pinned"],
+        },
         "state_note_count": len(state_notes),
         "persisted_match_count": len(persisted_records),
         "recent_notes": state_notes,
@@ -943,7 +1364,11 @@ def memory_writer_node(state: State) -> dict[str, object]:
     - memory.jsonl：方便跨运行保留经验。
     - MemoryRecord：让记忆有类型、状态、来源、路径和可信度。
 
-    还没有引入向量库，但已经比“只存一个 list”更接近真实 agent memory。
+    当前已经引入记忆治理：
+    - MemoryPolicy 先判断 store / discard。
+    - MemoryRecord 带 scope、retention_policy、validity_status、importance。
+    - 敏感字段和长文本会被裁剪。
+    - Postgres 后端会写 pgvector embedding。
     """
 
     pending_memory = dict(state["pending_memory"])
@@ -963,6 +1388,30 @@ def memory_writer_node(state: State) -> dict[str, object]:
     if not pending_memory:
         return update
 
+    task_id = str(pending_memory.get("task_id", state["current_task_id"]))
+    task = dict(task_tree.get(task_id, {}))
+    tool_name = str(task.get("tool") or state["tool_name"] or "none")
+    tool_result_status = str(
+        pending_memory.get("tool_result_status")
+        or task.get("tool_result_status")
+        or state["tool_result_status"]
+        or "none"
+    )
+    policy = _memory_policy_for_pending(
+        state,
+        pending_memory,
+        tool_name=tool_name,
+        tool_result_status=tool_result_status,
+    )
+    if policy.action == "discard":
+        update["messages"] = [
+            {
+                "role": "assistant",
+                "content": f"Memory Writer：跳过写入记忆，原因：{policy.reason}",
+            }
+        ]
+        return update
+
     record = _build_memory_record(state, pending_memory)
     backend, backend_error = _upsert_memory_record(record)
     record_dict = record.model_dump(mode="json")
@@ -975,7 +1424,8 @@ def memory_writer_node(state: State) -> dict[str, object]:
             "role": "assistant",
             "content": (
                 "Memory Writer：写入结构化记忆 "
-                f"{record.id}，类型={record.kind}，工具={record.tool_name}，backend={backend}。"
+                f"{record.id}，类型={record.kind}，"
+                f"工具={record.tool_name}，backend={backend}。"
             ),
         }
     ]
