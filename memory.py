@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from .embeddings import safe_embedding, vector_to_sql
+from .memory_quality import MemoryEvaluator, adjusted_memory_fields
 from .node_utils import goal_progress_snapshot
 from .state import State
 from .tooling.core import STATE_DIR, ensure_state_dirs
@@ -131,9 +132,13 @@ SENSITIVE_FIELD_NAMES = {
 # - 增加 MemoryAudit，记录哪条记忆影响了哪个 Planner/Evaluator 决策。
 # - 清理 expires_at 已过期的非 pinned 记忆。
 # - 增加 MemoryReranker，对候选记忆做任务相关性、可靠性和误导风险重排。
+# - 增加 MemoryEvaluator / MemoryQualityScore / MemoryDecay / MemoryTrustScore，
+#   在写入前评估记忆是否准确、重复、太泛、可执行、
+#   有证据、可信、会过期。
 #
 # 后续 TODO：
 # - 把当前本地特征 MemoryReranker 增强为 cross-encoder / LLM judge。
+# - 把当前本地特征 MemoryEvaluator 增强为离线 eval + 人工反馈 + LLM judge。
 # - 把 MemoryAudit 接到独立查询 API / dashboard。
 
 
@@ -182,6 +187,7 @@ class MemoryRecord(BaseModel):
     - 跟哪些路径相关。
     - 什么时候产生。
     - 是否可信。
+    - 质量评分、信任评分、衰减评分是多少。
     - 适用范围是什么。
     - 保留多久。
     - 当前是否仍然有效。
@@ -208,6 +214,9 @@ class MemoryRecord(BaseModel):
     tags: list[str] = Field(default_factory=list)
     confidence: float = 0.7
     importance: float = 0.5
+    quality_score: float = 0.5
+    trust_score: float = 0.5
+    decay_score: float = 0.0
     scope: MemoryScope = "project"
     visibility: MemoryVisibility = "project"
     sensitivity_level: SensitivityLevel = "internal"
@@ -227,13 +236,19 @@ class MemoryRecord(BaseModel):
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("confidence", "importance")
+    @field_validator(
+        "confidence",
+        "importance",
+        "quality_score",
+        "trust_score",
+        "decay_score",
+    )
     @classmethod
     def _confidence_between_zero_and_one(cls, value: float) -> float:
         """限制 confidence / importance 在 0 到 1 之间。"""
 
         if value < 0 or value > 1:
-            raise ValueError("confidence / importance 必须在 0 到 1 之间。")
+            raise ValueError("memory score 字段必须在 0 到 1 之间。")
         return value
 
 
@@ -432,6 +447,9 @@ class PostgresMemoryStore:
                     tags JSONB NOT NULL,
                     confidence DOUBLE PRECISION NOT NULL,
                     importance DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                    quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                    trust_score DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                    decay_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
                     scope TEXT NOT NULL DEFAULT 'project',
                     visibility TEXT NOT NULL DEFAULT 'project',
                     sensitivity_level TEXT NOT NULL DEFAULT 'internal',
@@ -468,6 +486,24 @@ class PostgresMemoryStore:
                 """
                 ALTER TABLE beginner_agent_memory
                 ADD COLUMN IF NOT EXISTS importance DOUBLE PRECISION NOT NULL DEFAULT 0.5
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS trust_score DOUBLE PRECISION NOT NULL DEFAULT 0.5
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE beginner_agent_memory
+                ADD COLUMN IF NOT EXISTS decay_score DOUBLE PRECISION NOT NULL DEFAULT 0.0
                 """
             )
             conn.execute(
@@ -576,7 +612,8 @@ class PostgresMemoryStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_beginner_agent_memory_governance
                 ON beginner_agent_memory (
-                    validity_status, retention_policy, scope, pinned, expires_at
+                    validity_status, retention_policy, scope, pinned,
+                    expires_at, quality_score, trust_score
                 )
                 """
             )
@@ -688,10 +725,11 @@ class PostgresMemoryStore:
                 """
                 SELECT id, kind, task_id, title, summary, status, tool_name,
                        tool_result_status, paths, tags, confidence, source,
-                       created_at::text, metadata, importance, scope,
-                       visibility, sensitivity_level, tenant_id, workspace_id,
-                       project_id, user_id, retention_policy, validity_status,
-                       pinned, expires_at::text, supersedes, contradiction_key
+                       created_at::text, metadata, importance, quality_score,
+                       trust_score, decay_score, scope, visibility,
+                       sensitivity_level, tenant_id, workspace_id, project_id,
+                       user_id, retention_policy, validity_status, pinned,
+                       expires_at::text, supersedes, contradiction_key
                 FROM beginner_agent_memory
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -717,19 +755,22 @@ class PostgresMemoryStore:
                     "created_at": row[12],
                     "metadata": row[13],
                     "importance": row[14],
-                    "scope": row[15],
-                    "visibility": row[16],
-                    "sensitivity_level": row[17],
-                    "tenant_id": row[18],
-                    "workspace_id": row[19],
-                    "project_id": row[20],
-                    "user_id": row[21],
-                    "retention_policy": row[22],
-                    "validity_status": row[23],
-                    "pinned": row[24],
-                    "expires_at": row[25],
-                    "supersedes": row[26],
-                    "contradiction_key": row[27],
+                    "quality_score": row[15],
+                    "trust_score": row[16],
+                    "decay_score": row[17],
+                    "scope": row[18],
+                    "visibility": row[19],
+                    "sensitivity_level": row[20],
+                    "tenant_id": row[21],
+                    "workspace_id": row[22],
+                    "project_id": row[23],
+                    "user_id": row[24],
+                    "retention_policy": row[25],
+                    "validity_status": row[26],
+                    "pinned": row[27],
+                    "expires_at": row[28],
+                    "supersedes": row[29],
+                    "contradiction_key": row[30],
                 }
             )
         return records
@@ -772,22 +813,21 @@ class PostgresMemoryStore:
                 INSERT INTO beginner_agent_memory (
                     id, kind, task_id, title, summary, status, tool_name,
                     tool_result_status, paths, tags, confidence, importance,
-                    scope, visibility, sensitivity_level, tenant_id, workspace_id,
-                    project_id, user_id, retention_policy, validity_status, pinned,
-                    expires_at, supersedes, contradiction_key, source, created_at,
-                    metadata
+                    quality_score, trust_score, decay_score, scope, visibility,
+                    sensitivity_level, tenant_id, workspace_id, project_id, user_id,
+                    retention_policy, validity_status, pinned, expires_at, supersedes,
+                    contradiction_key, source, created_at, metadata
                 )
                 VALUES (
                     %(id)s, %(kind)s, %(task_id)s, %(title)s, %(summary)s,
                     %(status)s, %(tool_name)s, %(tool_result_status)s,
                     %(paths)s::jsonb, %(tags)s::jsonb, %(confidence)s,
-                    %(importance)s, %(scope)s, %(visibility)s,
-                    %(sensitivity_level)s, %(tenant_id)s, %(workspace_id)s,
-                    %(project_id)s, %(user_id)s, %(retention_policy)s,
-                    %(validity_status)s, %(pinned)s,
-                    %(expires_at)s::timestamptz, %(supersedes)s,
-                    %(contradiction_key)s, %(source)s, %(created_at)s::timestamptz,
-                    %(metadata)s::jsonb
+                    %(importance)s, %(quality_score)s, %(trust_score)s,
+                    %(decay_score)s, %(scope)s, %(visibility)s, %(sensitivity_level)s,
+                    %(tenant_id)s, %(workspace_id)s, %(project_id)s, %(user_id)s,
+                    %(retention_policy)s, %(validity_status)s, %(pinned)s,
+                    %(expires_at)s::timestamptz, %(supersedes)s, %(contradiction_key)s,
+                    %(source)s, %(created_at)s::timestamptz, %(metadata)s::jsonb
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     kind = EXCLUDED.kind,
@@ -801,6 +841,9 @@ class PostgresMemoryStore:
                     tags = EXCLUDED.tags,
                     confidence = EXCLUDED.confidence,
                     importance = EXCLUDED.importance,
+                    quality_score = EXCLUDED.quality_score,
+                    trust_score = EXCLUDED.trust_score,
+                    decay_score = EXCLUDED.decay_score,
                     scope = EXCLUDED.scope,
                     visibility = EXCLUDED.visibility,
                     sensitivity_level = EXCLUDED.sensitivity_level,
@@ -898,10 +941,12 @@ class PostgresMemoryStore:
                 SELECT m.id, m.kind, m.task_id, m.title, m.summary, m.status,
                        m.tool_name, m.tool_result_status, m.paths, m.tags,
                        m.confidence, m.source, m.created_at::text, m.metadata,
-                       m.importance, m.scope, m.visibility, m.sensitivity_level,
-                       m.tenant_id, m.workspace_id, m.project_id, m.user_id,
-                       m.retention_policy, m.validity_status, m.pinned,
-                       m.expires_at::text, m.supersedes, m.contradiction_key,
+                       m.importance, m.quality_score, m.trust_score,
+                       m.decay_score, m.scope, m.visibility,
+                       m.sensitivity_level, m.tenant_id, m.workspace_id,
+                       m.project_id, m.user_id, m.retention_policy,
+                       m.validity_status, m.pinned, m.expires_at::text,
+                       m.supersedes, m.contradiction_key,
                        e.embedding <=> %(query_embedding)s::vector AS distance,
                        e.embedding_provider, e.embedding_model
                 FROM {table_name} e
@@ -943,22 +988,25 @@ class PostgresMemoryStore:
                     "created_at": row[12],
                     "metadata": row[13],
                     "importance": row[14],
-                    "scope": row[15],
-                    "visibility": row[16],
-                    "sensitivity_level": row[17],
-                    "tenant_id": row[18],
-                    "workspace_id": row[19],
-                    "project_id": row[20],
-                    "user_id": row[21],
-                    "retention_policy": row[22],
-                    "validity_status": row[23],
-                    "pinned": row[24],
-                    "expires_at": row[25],
-                    "supersedes": row[26],
-                    "contradiction_key": row[27],
-                    "vector_distance": float(row[28]),
-                    "embedding_provider": row[29],
-                    "embedding_model": row[30],
+                    "quality_score": row[15],
+                    "trust_score": row[16],
+                    "decay_score": row[17],
+                    "scope": row[18],
+                    "visibility": row[19],
+                    "sensitivity_level": row[20],
+                    "tenant_id": row[21],
+                    "workspace_id": row[22],
+                    "project_id": row[23],
+                    "user_id": row[24],
+                    "retention_policy": row[25],
+                    "validity_status": row[26],
+                    "pinned": row[27],
+                    "expires_at": row[28],
+                    "supersedes": row[29],
+                    "contradiction_key": row[30],
+                    "vector_distance": float(row[31]),
+                    "embedding_provider": row[32],
+                    "embedding_model": row[33],
                 }
             )
         return records
@@ -995,6 +1043,9 @@ def _embedding_text_for_record(record: MemoryRecord) -> str:
             f"retention_policy: {record.retention_policy}",
             f"validity_status: {record.validity_status}",
             f"importance: {record.importance}",
+            f"quality_score: {record.quality_score}",
+            f"trust_score: {record.trust_score}",
+            f"decay_score: {record.decay_score}",
             f"paths: {', '.join(record.paths)}",
             f"tags: {', '.join(record.tags)}",
         ]
@@ -1822,6 +1873,38 @@ def _govern_memory_record_before_write(
             )
         )
 
+    evaluation = MemoryEvaluator().evaluate(
+        record.model_dump(mode="json"),
+        existing_records,
+    )
+    quality_updates = adjusted_memory_fields(
+        record.model_dump(mode="json"),
+        evaluation,
+    )
+    metadata_updates["memory_quality_evaluation"] = evaluation.as_dict()
+    metadata_updates["memory_quality_evaluation"]["applied_updates"] = {
+        key: value
+        for key, value in quality_updates.items()
+        if key in {"quality_score", "trust_score", "decay_score"}
+    }
+    updates.update(quality_updates)
+    updates["metadata"] = metadata_updates
+    events.append(
+        _build_audit_event(
+            action="store" if evaluation.quality.decision != "reject" else "discard",
+            memory_id=record.id,
+            reason=(
+                "MemoryEvaluator 完成质量评分："
+                f"quality={evaluation.quality.overall}, "
+                f"trust={evaluation.trust.trust_score}, "
+                f"decay={evaluation.decay.decay_score}, "
+                f"decision={evaluation.quality.decision}。"
+            ),
+            backend=backend,
+            metadata=evaluation.as_dict(),
+        )
+    )
+
     if record.contradiction_key:
         shadowed_ids = [
             str(item.get("id"))
@@ -1880,12 +1963,10 @@ def _govern_memory_record_before_write(
             )
         )
 
-    if not updates:
-        return record, events
     return record.model_copy(update=updates), events
 
 
-def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str]:
+def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str, MemoryRecord]:
     """写入 memory record，并返回 backend 信息。"""
 
     try:
@@ -1914,7 +1995,7 @@ def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str]:
                 },
             )
         )
-        return store.backend_name, ""
+        return store.backend_name, "", governed_record
     except Exception as exc:
         fallback = JsonlMemoryStore()
         existing_records = fallback.list_records(MAX_MEMORY_RECORDS)
@@ -1939,7 +2020,7 @@ def _upsert_memory_record(record: MemoryRecord) -> tuple[str, str]:
                 },
             )
         )
-        return fallback.backend_name, str(exc)
+        return fallback.backend_name, str(exc), governed_record
 
 
 def _upsert_memory_audit_event(event: MemoryAuditEvent) -> tuple[str, str]:
@@ -2240,15 +2321,21 @@ def _reliability_score(record: dict[str, Any]) -> float:
 
     confidence = _float_record_value(record, "confidence", 0.7)
     importance = _float_record_value(record, "importance", 0.5)
+    quality = _float_record_value(record, "quality_score", 0.5)
+    trust = _float_record_value(record, "trust_score", 0.5)
+    decay = _float_record_value(record, "decay_score", 0.0)
     status_bonus = 0.2 if record.get("tool_result_status") == "success" else 0.0
     pinned_bonus = 0.25 if record.get("pinned") else 0.0
     failure_penalty = 0.15 if record.get("kind") == "failure" else 0.0
     score = (
-        (confidence * 0.45)
-        + (importance * 0.35)
+        (confidence * 0.25)
+        + (importance * 0.20)
+        + (quality * 0.20)
+        + (trust * 0.20)
         + status_bonus
         + pinned_bonus
         - failure_penalty
+        - (decay * 0.15)
     )
     return max(0.0, min(1.0, score))
 
@@ -2343,6 +2430,18 @@ def _rerank_memory_candidates(
                     "rule": round(normalized_rule, 4),
                     "token_overlap": round(token_overlap, 4),
                     "reliability": round(reliability, 4),
+                    "quality_score": round(
+                        _float_record_value(record, "quality_score", 0.5),
+                        4,
+                    ),
+                    "trust_score": round(
+                        _float_record_value(record, "trust_score", 0.5),
+                        4,
+                    ),
+                    "decay_score": round(
+                        _float_record_value(record, "decay_score", 0.0),
+                        4,
+                    ),
                     "recency": round(recency, 4),
                     "path_overlap": round(path_overlap, 4),
                     "misleading_risk": round(risk, 4),
@@ -2490,6 +2589,9 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "rule_score",
                 "importance",
                 "confidence",
+                "quality_score",
+                "trust_score",
+                "decay_score",
                 "pinned",
                 "rerank_score",
             ],
@@ -2502,6 +2604,12 @@ def memory_retriever_node(state: State) -> dict[str, object]:
                 "recency",
                 "path_overlap",
                 "misleading_risk",
+            ],
+            "quality_evaluation": [
+                "MemoryEvaluator",
+                "MemoryQualityScore",
+                "MemoryDecay",
+                "MemoryTrustScore",
             ],
         },
         "state_note_count": len(state_notes),
@@ -2597,8 +2705,8 @@ def memory_writer_node(state: State) -> dict[str, object]:
         return update
 
     record = _build_memory_record(state, pending_memory)
-    backend, backend_error = _upsert_memory_record(record)
-    record_dict = record.model_dump(mode="json")
+    backend, backend_error, governed_record = _upsert_memory_record(record)
+    record_dict = governed_record.model_dump(mode="json")
     if backend_error:
         record_dict["backend_warning"] = backend_error
     record_dict["backend"] = backend
@@ -2608,8 +2716,9 @@ def memory_writer_node(state: State) -> dict[str, object]:
             "role": "assistant",
             "content": (
                 "Memory Writer：写入结构化记忆 "
-                f"{record.id}，类型={record.kind}，"
-                f"工具={record.tool_name}，backend={backend}。"
+                f"{governed_record.id}，类型={governed_record.kind}，"
+                f"工具={governed_record.tool_name}，"
+                f"quality={governed_record.quality_score}，backend={backend}。"
             ),
         }
     ]
