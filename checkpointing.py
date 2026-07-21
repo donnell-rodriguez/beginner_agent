@@ -5,6 +5,14 @@ from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from beginner_agent.config import load_project_env
+
+
+# 中文注释：
+# checkpointing.py 是直接读取 DATABASE_URL 的模块。
+# 这里显式加载 .env，让这个文件单独阅读时也能看清楚配置来源。
+load_project_env()
+
 
 def checkpoint_backend_name() -> str:
     """读取当前 checkpoint backend。

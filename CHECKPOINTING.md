@@ -94,7 +94,41 @@ BEGINNER_AGENT_CHECKPOINT_DATABASE_URL=postgresql://...
 如果两个都没有设置，`checkpointing.py` 会直接报错。
 这比源码里内置默认数据库地址更符合生产级配置管理方式。
 
-## 4. 启动本地 Postgres
+## 4. .env 自动加载
+
+项目现在有一个统一配置入口：
+
+```text
+config.py
+```
+
+它负责把本地 `.env` 读入 `os.environ`：
+
+```text
+.env
+  -> config.py
+  -> os.environ
+  -> checkpointing.py / memory.py / llm_client.py
+```
+
+关系是：
+
+```text
+.env.example  配置模板，可以提交 GitHub
+.env          本地真实配置，被 .gitignore 忽略，不提交 GitHub
+config.py     本地开发时自动加载 .env
+```
+
+默认规则：
+
+```text
+shell / Docker / CI 已经注入的环境变量优先
+.env 只补充缺失的环境变量
+```
+
+这样本地开发方便，生产部署也不会被 `.env` 覆盖。
+
+## 5. 启动本地 Postgres
 
 ```bash
 docker compose up -d postgres
@@ -117,7 +151,7 @@ memory embeddings
 LangGraph checkpoints
 ```
 
-## 5. 验证 checkpoint
+## 6. 验证 checkpoint
 
 ```bash
 BEGINNER_AGENT_CHECKPOINT_BACKEND=postgres \
@@ -135,7 +169,7 @@ checkpointer=PostgresSaver
 
 第一次运行会自动创建 LangGraph checkpoint 表。
 
-## 6. 为什么生产环境不用 MemorySaver
+## 7. 为什么生产环境不用 MemorySaver
 
 `MemorySaver` 只存在于当前 Python 进程内。
 
