@@ -50,51 +50,8 @@ if __package__ is None or __package__ == "":
 #   add_conditional_edges(...)
 #   compile()
 from beginner_agent.graph import build_graph
-from beginner_agent.tools import READ_ONLY_TOOLS, WRITE_TOOLS
-
-
-# 中文注释：
-# _serialize_for_json 用来把 LangGraph 的最终 State 转成可打印 JSON。
-#
-# 为什么需要它？
-#   messages: Annotated[list, add_messages] 会把普通 dict 消息
-#   转成 LangChain 的 HumanMessage / AIMessage 对象。
-#
-# 这些对象不能直接 json.dumps(...)。
-#
-# 所以这里做一层转换：
-#   HumanMessage(content="你好")
-#   ->
-#   {"type": "human", "content": "你好"}
-def _serialize_for_json(value):
-    # 中文注释：
-    # 如果 value 是 list，就递归处理列表里的每个元素。
-    if isinstance(value, list):
-        return [_serialize_for_json(item) for item in value]
-
-    # 中文注释：
-    # 如果 value 是 dict，就递归处理每个 key/value。
-    if isinstance(value, dict):
-        return {key: _serialize_for_json(item) for key, item in value.items()}
-
-    # 中文注释：
-    # LangChain 的消息对象通常有 type 和 content 两个属性。
-    #
-    # 例如：
-    #   HumanMessage.type    -> "human"
-    #   HumanMessage.content -> 用户内容
-    #
-    #   AIMessage.type      -> "ai"
-    #   AIMessage.content   -> 模型内容
-    if hasattr(value, "type") and hasattr(value, "content"):
-        return {
-            "type": value.type,
-            "content": value.content,
-        }
-
-    # 中文注释：
-    # 其他普通值，例如字符串、数字、None，直接返回即可。
-    return value
+from beginner_agent.serialization import serialize_for_json
+from beginner_agent.state_factory import create_initial_state
 
 
 # 中文注释：
@@ -121,275 +78,15 @@ def run_case(user_input: str) -> None:
     # LangGraph 会从 START 开始，
     # 按 graph.py 里定义的节点和边执行，
     # 最后返回完整 State。
-    initial_state = {
-            # 中文注释：
-            # user_input 是用户输入。
-            # router_classifier_node 会读取它来判断任务类型、风险等级、是否需要工具。
-            "user_input": user_input,
+    initial_state = create_initial_state(user_input)
 
-            # 中文注释：
-            # task_type 是任务类型。
-            # 初始值先给 "chat"。
-            # 后面 router_classifier_node 会根据 user_input 改成 search/write/chat/agent。
-            "task_type": "chat",
-
-            # 中文注释：
-            # risk_level 是风险等级。
-            # Router / Classifier 会更新它。
-            "risk_level": "low",
-
-            # 中文注释：
-            # needs_tool 表示当前任务是否需要工具。
-            # Router / Classifier 会更新它。
-            "needs_tool": False,
-
-            # 中文注释：
-            # route_reason 保存 Router / Classifier 的判断原因。
-            "route_reason": "",
-
-            # 中文注释：
-            # next_action 表示复杂 agent 下一步应该走哪个模块。
-            "next_action": "schedule",
-
-            # 中文注释：
-            # draft 是中间结果。
-            # 初始为空字符串。
-            # search/write/chat 节点会写入它。
-            "draft": "",
-
-            # 中文注释：
-            # final_answer 是最终结果。
-            # 初始为空字符串。
-            # summarize_node 会写入它。
-            "final_answer": "",
-
-            # 中文注释：
-            # tool_name 是 LLM 选择的工具名。
-            # 初始值给 "none"，表示还没有选择工具。
-            "tool_name": "none",
-
-            # 中文注释：
-            # tool_args 是工具参数。
-            # 初始给空 dict。
-            "tool_args": {},
-
-            # 中文注释：
-            # tool_result 是工具执行结果。
-            # 初始为空字符串。
-            "tool_result": "",
-
-            # 中文注释：
-            # tool_result_data 是结构化工具结果。
-            # Executor 会写入 Pydantic ToolResult 的 dict。
-            # 机器判断优先看这个字段，人类阅读可以看 tool_result 字符串。
-            "tool_result_data": {},
-
-            # 中文注释：
-            # tool_result_status 明确区分工具执行结果：
-            # success / failed / blocked / empty / partial / none。
-            "tool_result_status": "none",
-
-            # 中文注释：
-            # Execution Monitor / Watchdog 对最近一次执行的观察状态。
-            "execution_monitor_status": "ok",
-            "execution_monitor_reason": "",
-
-            # 中文注释：
-            # Recovery Planner 对失败、超预算、部分结果的恢复决策。
-            "recovery_action": "none",
-            "recovery_reason": "",
-
-            # 中文注释：
-            # partial_result 和 resume_hint 用于“如实总结”和“下次继续”。
-            "partial_result": "",
-            "resume_hint": "",
-
-            # 中文注释：
-            # parent_evaluation 保存“子任务完成后，父任务状态如何变化”。
-            "parent_evaluation": {},
-
-            # 中文注释：
-            # goal_progress 保存“当前结果距离用户最终目标还有多远”。
-            "goal_progress": {},
-
-            # 中文注释：
-            # memory_notes 是我们放在 State 里的轻量记忆。
-            # LangGraph 的真正 checkpoint 在 graph.py 的 MemorySaver 里。
-            "memory_notes": [],
-
-            # 中文注释：
-            # memory_context 是 Memory Retriever 读取出来的相关历史记忆。
-            # 初始为空，复杂 agent 分支开始后由 memory_retriever_node 写入。
-            "memory_context": {},
-
-            # 中文注释：
-            # pending_memory 是 Task Committer 准备交给 Memory Writer 保存的记忆。
-            # 初始为空，每个任务提交后可能会产生一条。
-            "pending_memory": {},
-
-            # 中文注释：
-            # root_task_id 是任务树的根任务 id。
-            # root 代表用户输入的原始大任务。
-            "root_task_id": "root",
-
-            # 中文注释：
-            # task_tree 是复杂 agent 的任务树数据结构。
-            #
-            # 初始为空。
-            # scheduler_node 第一次运行时会自动创建 root 任务。
-            "task_tree": {},
-
-            # 中文注释：
-            # agenda 是待处理任务 id 队列。
-            #
-            # 注意：
-            #   queue agent 的 agenda 里直接放任务对象。
-            #   当前复杂 agent 的 agenda 里只放任务 id。
-            #
-            # 真正的任务内容都保存在 task_tree 里。
-            "agenda": [],
-
-            # 中文注释：
-            # current_task_id 是当前正在处理的任务 id。
-            # 初始为空，scheduler_node 会从 agenda 中选择一个 pending 任务。
-            "current_task_id": "",
-
-            # 中文注释：
-            # completed_tasks 保存已经完成的任务记录。
-            # 它在 State 里是 Annotated[list, add]，所以会自动追加。
-            "completed_tasks": [],
-
-            # 中文注释：
-            # patch_history 保存 apply_patch 的修改记录。
-            # rollback 会基于这里的 before_content 恢复文件。
-            "patch_history": [],
-
-            # 中文注释：
-            # execution_status 是 Executor 层的执行状态。
-            # 它和 tool_result_status 不一样：
-            #   tool_result_status 看工具结果。
-            #   execution_status 看执行过程，例如是否超预算、是否长任务。
-            "execution_status": "not_started",
-
-            # 中文注释：
-            # active_execution 保存当前或最近一次执行摘要。
-            # 后续如果接后台任务队列，这里可以保存 job_id / worker_id。
-            "active_execution": {},
-
-            # 中文注释：
-            # execution_attempts 保存所有工具执行尝试记录。
-            # 它在 State 里是 Annotated[list, add]，所以每次会自动追加。
-            "execution_attempts": [],
-
-            # 中文注释：
-            # max_tool_duration_ms 是工具执行预算。
-            # 当前同步工具不能被强制中断，但 Executor 会标记是否超过预算。
-            "max_tool_duration_ms": 30000,
-
-            # 中文注释：
-            # human_approvals 模拟人工审批。
-            #
-            # 写工具 apply_patch / rollback 默认不会自动执行。
-            # 如果你真的要允许某个任务执行写操作，可以把对应 task_id 设置为 True。
-            "human_approvals": {},
-
-            # 中文注释：
-            # pending_approval 保存当前等待人工确认的工具调用。
-            "pending_approval": {},
-
-            # 中文注释：
-            # planner_reason 保存 Planner / Decomposer 的判断原因。
-            "planner_reason": "",
-
-            # 中文注释：
-            # Plan Validator 用来检查 Planner 生成的计划是否可执行、是否重复、是否符合工具边界。
-            "plan_validation_status": "none",
-            "plan_validation_reason": "",
-
-            # 中文注释：
-            # policy_decision 和 policy_reason 保存工具权限判断结果。
-            "policy_decision": "deny",
-            "policy_reason": "",
-
-            # 中文注释：
-            # evaluation_decision 和 evaluation_reason 保存结果验证判断。
-            "evaluation_decision": "none",
-            "evaluation_reason": "",
-
-            # 中文注释：
-            # done 表示复杂 agent loop 是否结束。
-            # 初始 False。
-            "done": False,
-
-            # 中文注释：
-            # step_count 是当前复杂 agent 已经循环了多少轮。
-            "step_count": 0,
-
-            # 中文注释：
-            # max_steps 是复杂 agent loop 的最大循环次数。
-            #
-            # 真实 agent 必须有这个上限，避免 LLM 一直决定继续执行，
-            # 导致无限循环。
-            "max_steps": 12,
-
-            # 中文注释：
-            # max_depth 是任务树最多允许拆几层。
-            # 例如 2 表示：
-            #   root -> root.1 -> root.1.1
-            "max_depth": 2,
-
-            # 中文注释：
-            # max_total_tasks 是整棵任务树最多允许有多少个任务节点。
-            # 这是防止任务树无限膨胀的安全阀。
-            "max_total_tasks": 10,
-
-            # 中文注释：
-            # max_task_retries 是单个任务最大重试次数。
-            "max_task_retries": 1,
-
-            # 中文注释：
-            # allowed_tools 是工具白名单。
-            # 当前只允许只读 code-agent 工具，避免修改你的 Mac 文件。
-            "allowed_tools": [*READ_ONLY_TOOLS, *WRITE_TOOLS],
-
-            # 中文注释：
-            # permission_policy 是工具权限策略。
-            #
-            # allow：允许直接执行。
-            # deny：拒绝执行。
-            #
-            # 以后如果加入写文件、执行命令等危险工具，
-            # 可以扩展成 ask，让 agent 先请求用户确认。
-            "permission_policy": {
-                **{tool_name: "allow" for tool_name in READ_ONLY_TOOLS},
-                # 中文注释：
-                # 写工具默认 ask。
-                # Tool Policy 会要求 human_approvals[task_id] == True 才执行。
-                **{tool_name: "ask" for tool_name in WRITE_TOOLS},
-            },
-
-            # 中文注释：
-            # messages 是消息历史。
-            #
-            # 重点：
-            #   这个字段在 State 里写的是：
-            #   messages: Annotated[list, add_messages]
-            #
-            # 所以它不是普通覆盖字段，而是“自动追加字段”。
-            #
-            # 这里先放入第一条用户消息。
-            # 后面的 router/write/chat/summarize 节点都会返回新的 messages。
-            # LangGraph 会用 add_messages 自动把它们合并起来。
-            "messages": [
-                {
-                    "role": "user",
-                    "content": user_input,
-                }
-            ],
-        }
     # 中文注释：
-    # graph.py 里 compile(checkpointer=MemorySaver()) 开启了 checkpoint。
+    # graph.py 里 compile(checkpointer=...) 开启了 checkpoint。
     # 有 checkpoint 时，LangGraph 需要 thread_id 来区分不同会话。
+    #
+    # 注意：
+    #   run_case 是非交互 demo。
+    #   如果任务触发 Human Approval interrupt，请使用 cli.py。
     result = graph.invoke(
         initial_state,
         config={"configurable": {"thread_id": "beginner-agent-demo"}},
@@ -415,8 +112,8 @@ def run_case(user_input: str) -> None:
     #   用 2 个空格缩进，让输出更容易阅读。
     # 中文注释：
     # 由于 messages 里可能包含 HumanMessage / AIMessage 对象，
-    # 所以先用 _serialize_for_json(...) 转成普通 dict/list/string。
-    print(json.dumps(_serialize_for_json(result), ensure_ascii=False, indent=2))
+    # 所以先用 serialize_for_json(...) 转成普通 dict/list/string。
+    print(json.dumps(serialize_for_json(result), ensure_ascii=False, indent=2))
 
 
 # 中文注释：
@@ -442,7 +139,7 @@ if __name__ == "__main__":
     #   4. tool_policy_node 判断工具是否允许。
     #   5. executor_node 真正执行工具。
     #   6. evaluator_verifier_node 检查结果是否完成、是否要重试。
-    #   7. MemorySaver 保存 checkpoint。
+    #   7. checkpointing.py 选择 Memory/Postgres checkpoint 后端。
     # run_case("帮我写一段介绍 LangGraph 的文字，适合 Python 小白阅读")
 
     # 中文注释：

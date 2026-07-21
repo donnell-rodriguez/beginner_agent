@@ -493,14 +493,16 @@ class State(TypedDict):
     max_tool_duration_ms: int
 
     # 中文注释：
-    # human_approvals 模拟人工审批结果。
+    # human_approvals 保存已经完成的人工审批结果。
     #
     # key 是 task_id，value 是 True / False。
-    # 写文件工具默认需要审批，没有审批就不会执行。
+    # 写文件工具默认需要审批，Human Approval 会通过 LangGraph interrupt
+    # 暂停图执行，等 CLI / UI 用 Command(resume=...) 恢复。
     human_approvals: dict[str, bool]
 
     # 中文注释：
-    # pending_approval 保存当前等待人工确认的操作。
+    # pending_approval 保存当前等待人工确认的操作，
+    # CLI 会把这个内容展示给用户。
     pending_approval: dict[str, Any]
 
     # 中文注释：

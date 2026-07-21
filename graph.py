@@ -199,7 +199,8 @@ def build_graph():
     )
 
     # Human Approval
-    # 需要审批的工具调用在这里检查 human_approvals。
+    # 需要审批的工具调用在这里触发 LangGraph interrupt。
+    # CLI / UI 收到审批请求后，用 Command(resume=...) 恢复图执行。
     builder.add_conditional_edges(
         "human_approval",
         route_after_human_approval,
