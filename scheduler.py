@@ -123,6 +123,7 @@ def _ensure_root_task(state: State) -> tuple[dict[str, dict[str, Any]], list[str
     return task_tree, agenda
 
 
+# todo 那么pending里面已经按照顺序进行排列的了吗？
 def _select_pending_task_id(task_tree: dict[str, dict[str, Any]], agenda: list[str]) -> str:
     """Scheduler 从 agenda 中选择下一个 pending 任务。"""
 

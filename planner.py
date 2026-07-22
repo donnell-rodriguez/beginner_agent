@@ -464,6 +464,7 @@ def _llm_plan(task: dict[str, Any], state: State) -> tuple[str, str, list[dict[s
     action = str(data.get("action", "")).lower().strip()
     reason = str(data.get("reason") or "Planner 未提供原因。")
     subtasks = _normalize_subtasks(data, task, state)
+    # 如果生成的并不是我们想要的，那就说明什么问题，需要重新尝试吗？因为结果需要大模型给出，所以这里应该如何来做呢？
     if action not in ("expand", "execute"):
         raise ValueError("Planner action 不合法。")
     return action, reason, subtasks
