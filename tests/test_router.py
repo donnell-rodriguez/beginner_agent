@@ -20,16 +20,19 @@ from beginner_agent.state_factory import create_initial_state
 def isolated_router_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Router 测试使用独立文件，避免污染本地 .agent_state。"""
 
-    import beginner_agent.routering.observability as observability
+    import beginner_agent.routering.sinks as sinks
 
     router_dir = tmp_path / "router"
-    monkeypatch.setattr(observability, "ROUTER_DIR", router_dir)
-    monkeypatch.setattr(observability, "ROUTER_EVENTS_FILE", router_dir / "router_events.jsonl")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_OBSERVABILITY_ENABLED", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_OBSERVABILITY_SINK", "jsonl")
+    monkeypatch.setattr(sinks, "ROUTER_DIR", router_dir)
+    monkeypatch.setattr(sinks, "ROUTER_EVENTS_FILE", router_dir / "router_events.jsonl")
     monkeypatch.setattr(
-        observability,
+        sinks,
         "ROUTER_EVAL_CASES_FILE",
         router_dir / "router_eval_cases.jsonl",
     )
+    monkeypatch.setattr(sinks, "ROUTER_KAFKA_SPOOL_FILE", router_dir / "router_kafka_spool.jsonl")
 
 
 def test_router_parses_string_false_as_false(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,7 +159,7 @@ def test_router_rules_can_be_loaded_from_json_config(
 def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> None:
     """Router 每次决策都会写入可观测事件，方便后续审计和 eval。"""
 
-    import beginner_agent.routering.observability as observability
+    import beginner_agent.routering.sinks as sinks
 
     monkeypatch.setattr(
         router,
@@ -170,7 +173,7 @@ def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> N
     result = router.router_classifier_node(create_initial_state("你好"))
     records = [
         line
-        for line in observability.ROUTER_EVENTS_FILE.read_text(encoding="utf-8").splitlines()
+        for line in sinks.ROUTER_EVENTS_FILE.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 
@@ -188,6 +191,29 @@ def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> N
         "context_policy",
     }
     assert records
+
+
+def test_router_observability_null_sink_does_not_write_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Null sink 会保留 Router 运行，但不会写本地观测文件。"""
+
+    import beginner_agent.routering.sinks as sinks
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_OBSERVABILITY_SINK", "null")
+    monkeypatch.setattr(
+        router,
+        "chat_completion",
+        lambda *args, **kwargs: (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"普通问答","confidence":0.9}'
+        ),
+    )
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+
+    assert result["router_report"]["source"] == "llm"
+    assert not sinks.ROUTER_EVENTS_FILE.exists()
 
 
 def test_router_low_confidence_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
