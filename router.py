@@ -14,11 +14,11 @@ from .config import load_project_env
 from .routering.context import apply_context_policy, load_router_context
 from .routering.models import RouterDecision, RouterEvent, RouterStageReport
 from .routering.models import RouterSecuritySignal
+from .routering.multistage import build_multistage_reports, run_multistage_router
 from .routering.observability import append_router_event
 from .routering.prompts import select_router_prompt
 from .routering.rules import RouterRuleSet, load_router_rules
 from .routering.security import classify_router_security
-from .routering.stages import build_stage_reports
 from .state import RiskLevel, State, TaskType
 
 
@@ -255,23 +255,6 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     text = state["user_input"]
 
     # 中文注释：
-    # decision_source 说明最后决策来自哪里：
-    # - llm：模型输出可信，通过校验。
-    # - fallback：模型不可用、输出非法、或置信度太低。
-    # - security_override：安全规则或上下文策略提升了风险。
-    decision_source = "llm"
-
-    # 中文注释：
-    # fallback_reason / model_response / model_error 会进入 RouterEvent。
-    # 这样后续排查时能知道：
-    # - 模型到底返回了什么。
-    # - 为什么进入 fallback。
-    # - 有没有解析错误或 schema 错误。
-    fallback_reason = ""
-    model_response = ""
-    model_error = ""
-
-    # 中文注释：
     # started 用来计算 Router 耗时 latency_ms。
     # observability 里记录耗时，是为了后续发现模型或规则是否变慢。
     started = time.perf_counter()
@@ -286,72 +269,33 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     prompt = select_router_prompt(text)
     min_confidence = _router_min_confidence()
 
-    try:
-        # 中文注释：
-        # 第一层先让 LLM 做语义判断。
-        # 因为用户表达可能很复杂，纯关键词规则很容易误判。
-        #
-        # 但注意：
-        # LLM 只是一个“候选决策来源”，不是最终权威。
-        # 它的输出后面还要经过 Pydantic、confidence、安全规则和上下文策略。
-        model_response = chat_completion(
-            [
-                {
-                    "role": "system",
-                    "content": prompt.template,
-                },
-                {"role": "user", "content": text},
-            ],
-            temperature=prompt.temperature,
-            max_tokens=prompt.max_tokens,
-        )
-
-        # 中文注释：
-        # 把模型输出转成 RouterDecision。
-        # 如果模型输出不是严格 JSON，或字段不符合 schema，
-        # _parse_router_decision(...) 会抛错，下面 except 会进入 fallback。
-        decision = _parse_router_decision(model_response)
-
-        # 中文注释：
-        # 低置信度保护：
-        # 模型虽然给出了合法 JSON，但它自己也表示“不太确定”，
-        # 那么我们不直接相信它，而是回到本地规则。
-        if decision.confidence < min_confidence:
-            fallback_reason = (
-                f"LLM 置信度 {decision.confidence:.2f} 低于阈值 {min_confidence:.2f}。"
-            )
-            decision = _fallback_decision(
-                text,
-                "Router 兜底规则：LLM 置信度低，根据本地规则判断。",
-                rules=rules,
-            )
-            decision_source = "fallback"
-    except ROUTER_FALLBACK_ERRORS as exc:
-        # 中文注释：
-        # 只要 LLM 调用失败、JSON 解析失败、Pydantic 校验失败，
-        # 都会进入这里。
-        #
-        # 这让 Router 具备“模型失败也能继续跑”的工程稳定性。
-        fallback_reason = "LLM 不可用或输出不符合 schema。"
-        model_error = f"{type(exc).__name__}: {exc}"
-        decision = _fallback_decision(
-            text,
-            "Router 兜底规则：LLM 不可用或输出不符合 schema，根据本地规则判断。",
-            rules=rules,
-        )
-        decision_source = "fallback"
+    # 中文注释：
+    # 第一层现在不是“一次模型调用决定所有字段”，
+    # 而是交给 multistage.py 运行多个独立子 Router：
+    #
+    #   Intent Router      -> task_type
+    #   Risk Router        -> risk_level
+    #   Tool Needs Router  -> needs_tool
+    #   Security Router    -> prompt injection / 数据外泄 / 高风险动作
+    #
+    # 每个阶段都可以独立 fallback，
+    # 也可以在未来换成不同模型或不同规则集。
+    multistage = run_multistage_router(
+        text,
+        rules=rules,
+        security=security,
+        prompt=prompt,
+        chat_completion=chat_completion,
+        min_confidence=min_confidence,
+    )
+    decision = multistage.decision
+    decision_source = multistage.source
+    model_response = multistage.model_response
+    model_error = multistage.model_error
+    fallback_reason = multistage.fallback_reason
 
     # 中文注释：
-    # 第二层：安全分类覆盖。
-    # 如果用户输入像 prompt injection、读取 secret、危险代码动作，
-    # 就算 LLM 判成 low risk，这里也会保守提升成 high risk。
-    secured_decision = _apply_security_signal(decision, security)
-    if secured_decision != decision:
-        decision = secured_decision
-        decision_source = "security_override"
-
-    # 中文注释：
-    # 第三层：上下文策略覆盖。
+    # 第二层：上下文策略覆盖。
     # 某些 tenant / project / user 可以通过 .env 配置为高风险。
     # 例如生产项目、敏感客户项目、或者未授权用户。
     context_decision, context_policy_reason = apply_context_policy(decision, context)
@@ -361,14 +305,16 @@ def router_classifier_node(state: State) -> dict[str, Any]:
 
     # 中文注释：
     # 构造多级 Router 报告。
-    # stage_reports 会说明 intent / risk / tool_needs / security / context_policy
-    # 每一层分别判断了什么。
-    stage_reports = build_stage_reports(
-        text=text,
-        decision=decision,
-        rules=rules,
-        security=security,
-        context_policy_reason=context_policy_reason,
+    # 现在 intent_router / risk_router / tool_needs_router
+    # 都是真实独立执行过的子 Router，而不只是最终结果的解释性拆分。
+    stage_reports = build_multistage_reports(multistage)
+    stage_reports.append(
+        RouterStageReport(
+            stage="context_policy",
+            decision="high_risk_override" if context_policy_reason else "none",
+            reason=context_policy_reason or "未命中 tenant/project/user 路由策略。",
+            confidence=0.9,
+        )
     )
     stage_reports.append(
         RouterStageReport(

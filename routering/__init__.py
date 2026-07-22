@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from .context import apply_context_policy, load_router_context
 from .models import RouterDecision, RouterEvalCase, RouterEvent, RouterSecuritySignal
+from .multistage import (
+    MultiStageRouterResult,
+    RouterStageDecision,
+    build_multistage_reports,
+    run_multistage_router,
+)
 from .observability import append_router_eval_case, append_router_event, read_router_eval_cases
 from .prompts import RouterPromptSpec, select_router_prompt
 from .eval import (
@@ -40,7 +46,9 @@ __all__ = [
     "RouterPromptSpec",
     "RouterRule",
     "RouterRuleSet",
+    "RouterStageDecision",
     "RouterSecuritySignal",
+    "MultiStageRouterResult",
     "RuleDecision",
     "RuleMatch",
     "apply_context_policy",
@@ -49,6 +57,7 @@ __all__ = [
     "append_router_feedback",
     "append_router_event",
     "build_stage_reports",
+    "build_multistage_reports",
     "classify_router_security",
     "classify_router_eval_failure",
     "evaluate_router_prediction",
@@ -58,6 +67,7 @@ __all__ = [
     "read_router_eval_cases",
     "read_router_eval_trends",
     "run_router_eval",
+    "run_multistage_router",
     "select_router_prompt",
     "JsonlRouterObservabilitySink",
     "KafkaSpoolRouterObservabilitySink",

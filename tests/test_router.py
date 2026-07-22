@@ -428,14 +428,44 @@ def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> N
     assert result["router_report"]["latency_ms"] >= 0
     assert result["router_report"]["context"]["project_id"] == "beginner_agent"
     assert {item["stage"] for item in result["router_report"]["stage_reports"]} == {
-        "intent",
-        "risk",
-        "tool_needs",
-        "security",
+        "intent_router",
+        "risk_router",
+        "tool_needs_router",
+        "security_router",
         "context_policy",
         "prompt_registry",
     }
     assert records
+
+
+def test_router_runs_independent_multistage_model_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intent/Risk/Tool Needs 应该是独立子 Router，而不是一次模型调用包办。"""
+
+    captured_prompts: list[str] = []
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        captured_prompts.append(system_prompt)
+        if "Intent Router" in system_prompt:
+            return '{"task_type":"agent","reason":"需要处理代码任务。","confidence":0.91}'
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"high","reason":"涉及代码修改。","confidence":0.92}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":true,"reason":"需要读取和修改文件。","confidence":0.93}'
+        raise AssertionError(f"未识别的 Router 阶段：{system_prompt}")
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("帮我修复代码并运行测试"))
+    stage_names = {item["stage"] for item in result["router_report"]["stage_reports"]}
+
+    assert len(captured_prompts) == 3
+    assert result["task_type"] == "agent"
+    assert result["risk_level"] == "high"
+    assert result["needs_tool"] is True
+    assert {"intent_router", "risk_router", "tool_needs_router"} <= stage_names
 
 
 def test_router_uses_configured_prompt_registry(
@@ -473,7 +503,7 @@ def test_router_uses_configured_prompt_registry(
 
     result = router.router_classifier_node(create_initial_state("你好"))
 
-    assert captured["system_prompt"] == "TEST ROUTER PROMPT: return strict json only."
+    assert str(captured["system_prompt"]).startswith("TEST ROUTER PROMPT: return strict json only.")
     assert captured["max_tokens"] == 111
     prompt_stage = [
         item
