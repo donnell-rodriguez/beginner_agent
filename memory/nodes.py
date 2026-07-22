@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from .audit import _build_audit_event
+from .effectiveness import close_memory_usage_loop
 from .models import MemoryWriterRoute, memory_record_json_schema
 from .policy import _build_memory_record, _memory_access_context, _memory_policy_for_pending, _safe_memory_value
 from .retrieval import _preference_records_for_state, _retrieve_relevant_records, _seed_default_preference_memories
@@ -177,6 +178,7 @@ def memory_writer_node(state: State) -> dict[str, object]:
     pending_memory = dict(state["pending_memory"])
     task_tree = dict(state["task_tree"])
     goal_progress = goal_progress_snapshot(state, task_tree)
+    usage_effectiveness = close_memory_usage_loop(state)
     update: dict[str, object] = {
         "pending_memory": {},
         "goal_progress": goal_progress,
@@ -184,7 +186,10 @@ def memory_writer_node(state: State) -> dict[str, object]:
         "messages": [
             {
                 "role": "assistant",
-                "content": "Memory Writer：没有新的 pending_memory，回到 Scheduler。",
+                "content": (
+                    "Memory Writer：没有新的 pending_memory，回到 Scheduler。"
+                    f"usage_effectiveness={usage_effectiveness}"
+                ),
             }
         ],
     }
@@ -243,6 +248,7 @@ def memory_writer_node(state: State) -> dict[str, object]:
                 f"{governed_record.id}，类型={governed_record.kind}，"
                 f"工具={governed_record.tool_name}，"
                 f"quality={governed_record.quality_score}，backend={backend}。"
+                f" usage_effectiveness={usage_effectiveness}"
             ),
         }
     ]

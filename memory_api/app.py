@@ -209,6 +209,41 @@ def create_app() -> FastAPI:
         require_role(context, "audit_reader")
         return _repository_response(repository.rerank_telemetry(limit=limit), context)
 
+    @app.get("/usage/effectiveness", response_model=MemoryApiResponse)
+    def usage_effectiveness(
+        memory_id: str = "",
+        limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        return _repository_response(
+            repository.usage_effectiveness(memory_id=memory_id, limit=limit),
+            context,
+        )
+
+    @app.get("/eval/online", response_model=MemoryApiResponse)
+    def online_eval(
+        limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        return _repository_response(repository.online_eval(limit=limit), context)
+
+    @app.get("/observability/events", response_model=MemoryApiResponse)
+    def memory_observability(
+        limit: int = Query(default=100, ge=1, le=1000),
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "audit_reader")
+        return _repository_response(repository.memory_observability(limit=limit), context)
+
+    @app.get("/postgres/governance", response_model=MemoryApiResponse)
+    def postgres_governance(
+        context: ApiRequestContext = Depends(api_context),
+    ) -> MemoryApiResponse:
+        require_role(context, "admin")
+        return _repository_response(repository.postgres_governance(), context)
+
     @app.get("/audit", response_model=MemoryApiResponse)
     def audit(
         limit: int = Query(default=100, ge=1, le=1000),

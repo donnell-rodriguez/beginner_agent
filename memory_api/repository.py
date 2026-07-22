@@ -7,8 +7,12 @@ from typing import Any
 
 from beginner_agent.memory.audit import _build_audit_event
 from beginner_agent.memory.eval_cases import read_memory_eval_cases
+from beginner_agent.memory.effectiveness import read_memory_usage, summarize_memory_usage
 from beginner_agent.memory.feedback import feedback_summary_for_memory, read_memory_feedback
 from beginner_agent.memory.jsonl_store import JsonlMemoryStore, _read_jsonl_audit_events
+from beginner_agent.memory.observability_sinks import read_memory_observability_events
+from beginner_agent.memory.online_eval import read_online_eval_events, summarize_online_eval
+from beginner_agent.memory.postgres_performance import memory_postgres_governance_report
 from beginner_agent.memory.postgres_store import PostgresMemoryStore
 from beginner_agent.memory.rerank_observability import (
     read_rerank_telemetry,
@@ -448,9 +452,29 @@ class MemoryQueryRepository:
                 "memory_id": memory_id,
                 "direct_events": direct_events,
                 "used_by_events": used_by,
+                "effectiveness": summarize_memory_usage(memory_id),
             },
             result.backend,
             result.error,
+        )
+
+    def usage_effectiveness(
+        self,
+        *,
+        memory_id: str = "",
+        limit: int,
+    ) -> RepositoryResult:
+        """查询 memory 使用效果闭环。"""
+
+        events = read_memory_usage(limit)
+        if memory_id:
+            events = [event for event in events if str(event.get("memory_id", "")) == memory_id]
+        return RepositoryResult(
+            {
+                "summary": summarize_memory_usage(memory_id, limit=limit),
+                "events": events[-limit:],
+            },
+            "jsonl-memory-usage",
         )
 
     def feedback(
@@ -498,6 +522,45 @@ class MemoryQueryRepository:
             },
             "jsonl-rerank-telemetry",
         )
+
+    def online_eval(self, *, limit: int) -> RepositoryResult:
+        """查询 retrieval online eval。"""
+
+        return RepositoryResult(
+            {
+                "summary": summarize_online_eval(limit),
+                "events": read_online_eval_events(limit),
+            },
+            "jsonl-memory-online-eval",
+        )
+
+    def memory_observability(self, *, limit: int) -> RepositoryResult:
+        """查询 memory observability 本地事件。"""
+
+        return RepositoryResult(
+            read_memory_observability_events(limit),
+            "jsonl-memory-observability",
+        )
+
+    def postgres_governance(self) -> RepositoryResult:
+        """查询 Postgres memory schema / performance governance。"""
+
+        import os
+
+        database_url = os.getenv("DATABASE_URL", "").strip()
+        if not database_url:
+            return RepositoryResult(
+                None,
+                "postgres",
+                "DATABASE_URL 未配置。",
+            )
+        try:
+            return RepositoryResult(
+                memory_postgres_governance_report(database_url),
+                "postgres",
+            )
+        except Exception as exc:
+            return RepositoryResult(None, "postgres", str(exc))
 
     def contradiction_evolution(
         self,

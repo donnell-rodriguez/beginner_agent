@@ -8,9 +8,12 @@ from typing import Any
 from .failure import failure_rerank_signal
 from .audit import _build_audit_event
 from .eval_cases import evaluate_retrieval_case, read_memory_eval_cases
+from .effectiveness import record_retrieved_memory_usage
 from .jsonl_store import JsonlMemoryStore
 from .judge import cross_encoder_rerank_score
 from .models import MemoryRecord
+from .observability_sinks import append_memory_observability_event
+from .online_eval import record_retrieval_online_eval
 from .policy import (
     _dedupe_contradiction_records,
     _memory_access_context,
@@ -499,6 +502,18 @@ def _record_rerank_telemetry(
             "eval_matches": eval_matches[:5],
         }
     )
+    append_memory_observability_event(
+        {
+            "event_type": "memory_rerank",
+            "run_id": state.get("run_id", ""),
+            "task_id": state.get("current_task_id", ""),
+            "backend": backend,
+            "backend_error": backend_error,
+            "candidate_count": len(candidates),
+            "returned_count": len(returned_ids),
+            "returned_ids": returned_ids[:12],
+        }
+    )
 
 
 def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str, str]:
@@ -582,4 +597,6 @@ def _retrieve_relevant_records(state: State) -> tuple[list[dict[str, Any]], str,
         backend=backend,
         backend_error=errors,
     )
+    record_retrieved_memory_usage(state, results)
+    record_retrieval_online_eval(state, results, backend=backend, backend_error=errors)
     return results, backend, errors

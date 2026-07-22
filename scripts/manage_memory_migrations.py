@@ -20,6 +20,7 @@ from beginner_agent.memory.migrations import (  # noqa: E402
     rollback_memory_migration,
     run_memory_migrations,
 )
+from beginner_agent.memory.postgres_performance import memory_postgres_governance_report  # noqa: E402
 
 
 def _database_url() -> str:
@@ -34,8 +35,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Manage beginner_agent memory migrations.")
     parser.add_argument(
         "command",
-        choices=["status", "upgrade", "rollback", "backfill"],
-        help="status 查看版本；upgrade 执行迁移；rollback 回滚；backfill 回填历史数据。",
+        choices=["status", "upgrade", "rollback", "backfill", "governance"],
+        help=(
+            "status 查看版本；upgrade 执行迁移；rollback 回滚；"
+            "backfill 回填历史数据；governance 检查索引/性能/迁移状态。"
+        ),
     )
     parser.add_argument("--target-version", type=int, default=0)
     parser.add_argument("--limit", type=int, default=1000)
@@ -54,8 +58,10 @@ def main() -> None:
             database_url,
             target_version=args.target_version,
         )
-    else:
+    elif args.command == "backfill":
         result = backfill_memory_governance_fields(database_url, limit=args.limit)
+    else:
+        result = memory_postgres_governance_report(database_url)
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

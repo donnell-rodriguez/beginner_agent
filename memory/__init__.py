@@ -20,6 +20,14 @@ from __future__ import annotations
 
 from .audit import _build_audit_event
 from .eval_cases import MemoryEvalCase, append_memory_eval_case, read_memory_eval_cases
+from .effectiveness import (
+    MemoryUsageEvent,
+    append_memory_usage,
+    close_memory_usage_loop,
+    read_memory_usage,
+    record_retrieved_memory_usage,
+    summarize_memory_usage,
+)
 from .feedback import (
     MemoryFeedbackEvent,
     append_memory_feedback,
@@ -47,11 +55,23 @@ from .models import (
     memory_record_json_schema,
 )
 from .nodes import memory_retriever_node, memory_writer_node, route_after_memory_writer
+from .observability_sinks import (
+    append_memory_observability_event,
+    read_memory_observability_events,
+)
+from .online_eval import (
+    MemoryOnlineEvalEvent,
+    append_online_eval_event,
+    read_online_eval_events,
+    record_retrieval_online_eval,
+    summarize_online_eval,
+)
 from .policy import (
     _memory_access_context,
     _safe_memory_value,
     _stable_memory_id,
 )
+from .postgres_performance import memory_postgres_governance_report
 from .postgres_store import PostgresMemoryStore
 from .settings import (
     DEFAULT_MEMORY_BACKEND,
@@ -125,6 +145,8 @@ __all__ = [
     "MemoryRecord",
     "MemoryScope",
     "MemoryStore",
+    "MemoryOnlineEvalEvent",
+    "MemoryUsageEvent",
     "MemoryVisibility",
     "MemoryWriterRoute",
     "PostgresMemoryStore",
@@ -142,14 +164,26 @@ __all__ = [
     "_upsert_memory_record",
     "append_memory_eval_case",
     "append_memory_feedback",
+    "append_memory_observability_event",
+    "append_memory_usage",
+    "append_online_eval_event",
+    "close_memory_usage_loop",
     "feedback_summary_for_memory",
+    "memory_postgres_governance_report",
     "memory_record_json_schema",
     "memory_retriever_node",
     "memory_writer_node",
     "read_memory_eval_cases",
     "read_memory_feedback",
+    "read_memory_observability_events",
+    "read_memory_usage",
+    "read_online_eval_events",
     "read_rerank_telemetry",
+    "record_retrieved_memory_usage",
+    "record_retrieval_online_eval",
     "rerank_ab_bucket",
     "route_after_memory_writer",
+    "summarize_memory_usage",
+    "summarize_online_eval",
     "summarize_rerank_telemetry",
 ]
