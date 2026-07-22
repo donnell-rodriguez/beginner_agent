@@ -9,8 +9,46 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ..state import RiskLevel, TaskType
 
 
+# 中文注释：
+# routering/models.py 专门放 Router 层的数据结构。
+#
+# 你可以把它理解成“Router 这个 node 相关的数据合同”：
+#
+#     router.py 负责做事情
+#     models.py 负责定义事情产生的数据长什么样
+#
+# 对于每个 node 来说，先定义清楚数据结构很重要：
+# - 输入输出更稳定。
+# - 测试更容易写。
+# - 后续 observability / eval / audit 可以直接复用这些结构。
+# - 不同模块之间不会靠散乱 dict 猜字段。
+#
+# 在这个文件里：
+# - RouterDecision：Router 最终决策。
+# - RouterSecuritySignal：安全风险判断。
+# - RouterContext：tenant/project/user 上下文。
+# - RouterStageReport：多级 Router 每一层的判断记录。
+# - RouterEvent：一次 Router 决策的完整审计事件。
+# - RouterEvalCase：离线评估样本。
+
+
+# 中文注释：
+# DecisionSource 表示“最终 Router 决策来自哪里”。
+# llm：模型输出通过校验后被采用。
+# fallback：模型失败、输出非法、或置信度太低，改用本地规则。
+# security_override：安全规则或上下文策略把风险提升了。
 DecisionSource = Literal["llm", "fallback", "security_override"]
+
+# 中文注释：
+# InjectionRisk 表示 prompt injection 风险等级。
+# none：没发现注入风险。
+# suspected：有可疑注入指令。
+# high：注入指令和危险意图同时出现。
 InjectionRisk = Literal["none", "suspected", "high"]
+
+# 中文注释：
+# MaliciousIntent 表示 Router 层识别到的恶意/危险意图类型。
+# 注意它不是最终拒绝策略，只是第一层风险信号。
 MaliciousIntent = Literal["none", "prompt_injection", "unsafe_code_action", "data_exfiltration"]
 
 
@@ -27,15 +65,38 @@ class RouterDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # 中文注释：
+    # task_type 决定 graph.py 下一步走哪个分支。
+    # 它必须是 state.py 里定义的 TaskType：
+    # search / write / chat / agent。
     task_type: TaskType
+
+    # 中文注释：
+    # risk_level 给后续 Tool Policy 使用。
+    # high 通常意味着后面需要人工审批或更严格的安全检查。
     risk_level: RiskLevel = "low"
+
+    # 中文注释：
+    # needs_tool 表示这个任务是否需要工具。
+    # agent 分支通常是 True，普通 chat 通常是 False。
     needs_tool: bool
+
+    # 中文注释：
+    # reason 是给人看的解释。
+    # 后续调试时，你可以看它理解 Router 为什么这样判断。
     reason: str = Field(default="Router 未提供原因。", min_length=1)
+
+    # 中文注释：
+    # confidence 是 Router 对自己判断的置信度。
+    # router.py 里会用它做低置信度 fallback。
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
     @field_validator("reason")
     @classmethod
     def _clean_reason(cls, value: str) -> str:
+        # 中文注释：
+        # 即使模型返回的是空字符串，也统一替换成默认说明。
+        # 这样外部展示和日志里不会出现空 reason。
         cleaned = value.strip()
         return cleaned or "Router 未提供原因。"
 
@@ -55,11 +116,24 @@ class RouterSecuritySignal:
     """
 
     injection_risk: InjectionRisk
+
+    # 中文注释：
+    # malicious_intent 是更具体的危险类型。
+    # 例如 data_exfiltration 表示用户可能想读取/泄露敏感信息。
     malicious_intent: MaliciousIntent
+
+    # 中文注释：
+    # labels 保存命中的安全标签列表。
+    # 一个输入可能同时命中 prompt_injection 和 data_exfiltration。
     labels: list[str]
+
+    # 中文注释：
+    # reason 解释为什么命中了这些安全标签。
     reason: str
 
     def as_dict(self) -> dict[str, Any]:
+        """把 dataclass 转成普通 dict，方便写入 State / JSONL。"""
+
         return {
             "injection_risk": self.injection_risk,
             "malicious_intent": self.malicious_intent,
@@ -84,6 +158,8 @@ class RouterContext:
     user_id: str
 
     def as_dict(self) -> dict[str, str]:
+        """把 RouterContext 转成 JSON 友好的 dict。"""
+
         return {
             "tenant_id": self.tenant_id,
             "workspace_id": self.workspace_id,
@@ -107,11 +183,23 @@ class RouterStageReport:
     """
 
     stage: str
+
+    # 中文注释：
+    # decision 是这一层的判断结果。
+    # 例如 stage="risk" 时，decision 可能是 "high"。
     decision: str
+
+    # 中文注释：
+    # reason 解释这一层为什么这样判断。
     reason: str
+
+    # 中文注释：
+    # confidence 是这一层判断的置信度。
     confidence: float = 0.7
 
     def as_dict(self) -> dict[str, Any]:
+        """把单个 stage report 转成 dict。"""
+
         return {
             "stage": self.stage,
             "decision": self.decision,
@@ -132,22 +220,73 @@ class RouterEvent:
     - 有没有安全信号命中？
     """
 
+    # 中文注释：
+    # decision_id 是这次 Router 决策的唯一标识。
+    # 后续审计、查询、排障可以用它串起来。
     decision_id: str
+
+    # 中文注释：
+    # run_id 是整次 agent 运行的唯一 ID。
+    # 一个 run 里可能有很多事件，RouterEvent 是其中一个。
     run_id: str
+
+    # 中文注释：
+    # event_type 表示事件类型。
+    # 当前固定是 router_decision，后续可以扩展 router_eval / router_feedback。
     event_type: str
+
+    # 中文注释：
+    # user_input 是原始用户输入。
+    # 记录它是为了后续复盘 Router 为什么这样分类。
     user_input: str
+
+    # 中文注释：
+    # decision 是最终 RouterDecision。
+    # 它是经过 LLM / fallback / security / context policy 后的最终结果。
     decision: RouterDecision
+
+    # 中文注释：
+    # source 表示最终决策来源。
     source: DecisionSource
+
+    # 中文注释：
+    # context 记录当前租户/工作区/项目/用户。
     context: RouterContext
+
+    # 中文注释：
+    # stage_reports 记录多级 Router 每一层的判断。
     stage_reports: list[RouterStageReport]
+
+    # 中文注释：
+    # security 保存安全分类结果。
     security: RouterSecuritySignal
+
+    # 中文注释：
+    # latency_ms 是 Router 本次决策耗时。
+    # 这是可观测性的重要指标。
     latency_ms: int
+
+    # 中文注释：
+    # model_response 保存模型原始响应的截断版本。
+    # 它用于排查模型为什么输出某个结果。
     model_response: str = ""
+
+    # 中文注释：
+    # model_error 保存模型调用或解析失败的错误信息。
     model_error: str = ""
+
+    # 中文注释：
+    # fallback_reason 记录为什么使用 fallback。
     fallback_reason: str = ""
+
+    # 中文注释：
+    # created_at 是事件创建时间。
+    # 如果外部没有传入，就在 as_dict() 里自动生成当前 UTC 时间。
     created_at: str = ""
 
     def as_dict(self) -> dict[str, Any]:
+        """把 RouterEvent 转成普通 dict，方便写入 State / JSONL。"""
+
         return {
             "decision_id": self.decision_id,
             "run_id": self.run_id,
@@ -178,13 +317,25 @@ class RouterEvalCase:
     """
 
     user_input: str
+
+    # 中文注释：
+    # 下面三个 expected_* 字段是“期望 Router 输出”。
+    # 后续 evaluate_router_prediction(...) 会拿当前 Router 的实际输出和它对比。
     expected_task_type: TaskType
     expected_risk_level: RiskLevel
     expected_needs_tool: bool
+
+    # 中文注释：
+    # reason 说明为什么这个 case 的期望结果是这样。
     reason: str = ""
+
+    # 中文注释：
+    # created_at 保存 eval case 生成时间。
     created_at: str = ""
 
     def as_dict(self) -> dict[str, Any]:
+        """把 RouterEvalCase 转成 JSON 友好的 dict。"""
+
         return {
             "user_input": self.user_input,
             "expected_task_type": self.expected_task_type,
