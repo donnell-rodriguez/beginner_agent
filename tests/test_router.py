@@ -16,6 +16,7 @@ from beginner_agent.routering.eval_runner import (
     read_router_eval_trends,
     run_router_eval,
 )
+from beginner_agent.routering.feedback import read_router_feedback, record_router_correction
 from beginner_agent.routering.models import RouterEvalCase
 from beginner_agent.routering.observability import (
     append_router_eval_case,
@@ -44,6 +45,7 @@ def isolated_router_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         "ROUTER_EVAL_CASES_FILE",
         router_dir / "router_eval_cases.jsonl",
     )
+    monkeypatch.setattr(sinks, "ROUTER_FEEDBACK_FILE", router_dir / "router_feedback.jsonl")
     monkeypatch.setattr(sinks, "ROUTER_KAFKA_SPOOL_FILE", router_dir / "router_kafka_spool.jsonl")
     monkeypatch.setattr(
         eval_runner,
@@ -816,3 +818,78 @@ def test_router_eval_feedback_flows_into_eval_cases() -> None:
     assert case.expected_task_type == "agent"
     assert cases[-1]["user_input"] == "请修复 pytest"
     assert cases[-1]["reason"].startswith("unit_test_feedback")
+
+
+def test_router_correction_from_report_records_feedback_and_eval_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户纠正某次真实 router_report 后，要同时保存 feedback event 和 eval case。"""
+
+    monkeypatch.setattr(
+        router,
+        "chat_completion",
+        lambda *args, **kwargs: (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"误判成普通聊天","confidence":0.9}'
+        ),
+    )
+
+    routed = router.router_classifier_node(create_initial_state("请帮我理解这个项目源码结构"))
+    result = record_router_correction(
+        router_report=routed["router_report"],
+        expected_task_type="agent",
+        expected_risk_level="low",
+        expected_needs_tool=True,
+        correction_reason="理解项目源码结构需要进入 agent 并使用读文件工具。",
+        source="unit_test_correction",
+        actor_id="tester",
+    )
+    feedback = read_router_feedback()
+    cases = read_router_eval_cases()
+
+    assert result.duplicate is False
+    assert feedback[-1]["feedback_id"] == result.event.feedback_id
+    assert feedback[-1]["decision_id"] == routed["router_report"]["decision_id"]
+    assert feedback[-1]["actual_task_type"] == "chat"
+    assert feedback[-1]["expected_task_type"] == "agent"
+    assert cases[-1]["user_input"] == "请帮我理解这个项目源码结构"
+    assert cases[-1]["expected_needs_tool"] is True
+    assert "feedback_id=" in cases[-1]["reason"]
+
+
+def test_router_correction_can_lookup_event_by_decision_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只提供 decision_id 时，反馈闭环应该能从历史 RouterEvent 反查原始输入。"""
+
+    monkeypatch.setattr(
+        router,
+        "chat_completion",
+        lambda *args, **kwargs: (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"误判","confidence":0.9}'
+        ),
+    )
+
+    routed = router.router_classifier_node(create_initial_state("帮我看一下 graph.py"))
+    decision_id = routed["router_report"]["decision_id"]
+    result = record_router_correction(
+        decision_id=decision_id,
+        expected_task_type="agent",
+        expected_risk_level="low",
+        expected_needs_tool=True,
+        correction_reason="看文件需要工具。",
+        source="unit_test_decision_lookup",
+    )
+    duplicate = record_router_correction(
+        decision_id=decision_id,
+        expected_task_type="agent",
+        expected_risk_level="low",
+        expected_needs_tool=True,
+        correction_reason="重复提交应该幂等。",
+        source="unit_test_decision_lookup",
+    )
+
+    assert result.event.user_input == "帮我看一下 graph.py"
+    assert result.event.decision_id == decision_id
+    assert duplicate.duplicate is True

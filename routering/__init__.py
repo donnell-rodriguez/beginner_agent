@@ -23,6 +23,12 @@ from .eval_runner import (
     read_router_eval_trends,
     run_router_eval,
 )
+from .feedback import (
+    RouterFeedbackEvent,
+    RouterFeedbackResult,
+    read_router_feedback,
+    record_router_correction,
+)
 from .rules import RouterRule, RouterRuleSet, RuleDecision, RuleMatch, load_router_rules
 from .security import classify_router_security
 from .sinks import (
@@ -42,6 +48,8 @@ __all__ = [
     "RouterEvalRun",
     "RouterEvent",
     "RouterFeedbackRecord",
+    "RouterFeedbackEvent",
+    "RouterFeedbackResult",
     "RouterObservabilitySink",
     "RouterPromptSpec",
     "RouterRule",
@@ -66,6 +74,8 @@ __all__ = [
     "load_router_rules",
     "read_router_eval_cases",
     "read_router_eval_trends",
+    "read_router_feedback",
+    "record_router_correction",
     "run_router_eval",
     "run_multistage_router",
     "select_router_prompt",

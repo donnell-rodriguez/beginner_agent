@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from beginner_agent.router import router_classifier_node
@@ -13,6 +15,7 @@ from beginner_agent.routering.eval_runner import (
     read_router_eval_trends,
     run_router_eval,
 )
+from beginner_agent.routering.feedback import read_router_feedback, record_router_correction
 from beginner_agent.routering.models import RouterDecision
 from beginner_agent.state_factory import create_initial_state
 
@@ -26,6 +29,8 @@ from beginner_agent.state_factory import create_initial_state
 #   PYTHONPATH=.. uv run python scripts/router_eval.py replay --dataset router_eval.json
 #   PYTHONPATH=.. uv run python scripts/router_eval.py feedback --user-input "帮我修复测试" \
 #       --task-type agent --risk-level high --needs-tool true --reason "代码修改必须进 agent"
+#   PYTHONPATH=.. uv run python scripts/router_eval.py feedback --router-report router_report.json \
+#       --task-type agent --risk-level high --needs-tool true --reason "这次应该进入 code agent"
 #   PYTHONPATH=.. uv run python scripts/router_eval.py trends --limit 10
 #
 # 它不放在 router.py 里，是为了让业务节点保持干净。
@@ -58,6 +63,31 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 
 def _cmd_feedback(args: argparse.Namespace) -> int:
+    # 中文注释：
+    # 如果传入 router_report 或 decision_id，就走新的反馈闭环：
+    #
+    #   真实 RouterEvent / router_report
+    #     -> RouterFeedbackEvent
+    #     -> RouterEvalCase
+    #
+    # 如果只传 user_input，则保留旧的手动 eval case 录入方式。
+    if args.router_report or args.decision_id:
+        result = record_router_correction(
+            router_report=_load_router_report(args.router_report),
+            decision_id=args.decision_id or "",
+            user_input=args.user_input or "",
+            expected_task_type=args.task_type,
+            expected_risk_level=args.risk_level,
+            expected_needs_tool=_parse_bool(args.needs_tool),
+            correction_reason=args.reason,
+            source=args.source,
+            actor_id=args.actor_id,
+        )
+        print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    if not args.user_input:
+        raise SystemExit("--user-input is required when --router-report/--decision-id is not provided")
     record = make_feedback_record(
         user_input=args.user_input,
         expected_task_type=args.task_type,
@@ -68,6 +98,12 @@ def _cmd_feedback(args: argparse.Namespace) -> int:
     )
     case = append_router_feedback(record)
     print(json.dumps(case.as_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_feedback_list(args: argparse.Namespace) -> int:
+    records = read_router_feedback(args.limit)
+    print(json.dumps(records, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -86,6 +122,15 @@ def _parse_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"Invalid bool value: {value}")
 
 
+def _load_router_report(path: str | None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit("--router-report must point to a JSON object")
+    return data
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Router eval replay / feedback / trends CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -97,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     replay.set_defaults(func=_cmd_replay)
 
     feedback = subparsers.add_parser("feedback", help="把线上纠错反馈写成 eval case。")
-    feedback.add_argument("--user-input", required=True)
+    feedback.add_argument("--user-input", default="")
+    feedback.add_argument("--router-report", default=None, help="router_report JSON 文件路径。")
+    feedback.add_argument("--decision-id", default="", help="根据历史 RouterEvent decision_id 纠错。")
     feedback.add_argument(
         "--task-type",
         required=True,
@@ -107,7 +154,15 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--needs-tool", required=True)
     feedback.add_argument("--reason", required=True)
     feedback.add_argument("--source", default="manual_feedback")
+    feedback.add_argument(
+        "--actor-id",
+        default=os.getenv("BEGINNER_AGENT_ROUTER_FEEDBACK_ACTOR_ID", "local-user"),
+    )
     feedback.set_defaults(func=_cmd_feedback)
+
+    feedback_list = subparsers.add_parser("feedback-list", help="查看 Router 人工纠错事件。")
+    feedback_list.add_argument("--limit", type=int, default=None)
+    feedback_list.set_defaults(func=_cmd_feedback_list)
 
     trends = subparsers.add_parser("trends", help="查看 Router eval 趋势。")
     trends.add_argument("--limit", type=int, default=None)

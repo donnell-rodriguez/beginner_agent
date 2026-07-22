@@ -7,6 +7,7 @@ from .sinks import (
     ROUTER_DIR,
     ROUTER_EVAL_CASES_FILE,
     ROUTER_EVENTS_FILE,
+    ROUTER_FEEDBACK_FILE,
     ROUTER_KAFKA_SPOOL_FILE,
     resolve_router_observability_sink,
 )
@@ -31,6 +32,17 @@ def append_router_event(event: RouterEvent) -> None:
     resolve_router_observability_sink().append_event(event)
 
 
+def read_router_events(limit: int | None = None) -> list[dict[str, Any]]:
+    """读取 Router 观测事件。
+
+    中文注释：
+    人工反馈闭环需要先找到“哪一次 Router 决策错了”。
+    所以这里提供稳定读取入口，而不是让 CLI/API 直接读 JSONL 文件。
+    """
+
+    return resolve_router_observability_sink().read_events(limit)
+
+
 def append_router_eval_case(case: RouterEvalCase) -> None:
     """追加 Router eval case。"""
 
@@ -43,12 +55,28 @@ def read_router_eval_cases(limit: int | None = None) -> list[dict[str, Any]]:
     return resolve_router_observability_sink().read_eval_cases(limit)
 
 
+def append_router_feedback_event(event: dict[str, Any]) -> None:
+    """追加 Router 人工纠错反馈事件。"""
+
+    resolve_router_observability_sink().append_feedback_event(event)
+
+
+def read_router_feedback_events(limit: int | None = None) -> list[dict[str, Any]]:
+    """读取 Router 人工纠错反馈事件。"""
+
+    return resolve_router_observability_sink().read_feedback_events(limit)
+
+
 __all__ = [
     "ROUTER_DIR",
     "ROUTER_EVAL_CASES_FILE",
     "ROUTER_EVENTS_FILE",
+    "ROUTER_FEEDBACK_FILE",
     "ROUTER_KAFKA_SPOOL_FILE",
     "append_router_eval_case",
     "append_router_event",
+    "append_router_feedback_event",
+    "read_router_events",
     "read_router_eval_cases",
+    "read_router_feedback_events",
 ]

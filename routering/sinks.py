@@ -29,6 +29,7 @@ from .models import RouterEvalCase, RouterEvent
 ROUTER_DIR = STATE_DIR / "router"
 ROUTER_EVENTS_FILE = ROUTER_DIR / "router_events.jsonl"
 ROUTER_EVAL_CASES_FILE = ROUTER_DIR / "router_eval_cases.jsonl"
+ROUTER_FEEDBACK_FILE = ROUTER_DIR / "router_feedback.jsonl"
 ROUTER_KAFKA_SPOOL_FILE = ROUTER_DIR / "router_kafka_spool.jsonl"
 
 DEFAULT_MAX_ROUTER_EVENTS = 2000
@@ -51,11 +52,20 @@ class RouterObservabilitySink(Protocol):
     def append_event(self, event: RouterEvent) -> None:
         """写入一次 Router 决策事件。"""
 
+    def read_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """读取 Router 决策事件，用于定位某次错误路由。"""
+
     def append_eval_case(self, case: RouterEvalCase) -> None:
         """写入一条 Router 离线评估 case。"""
 
     def read_eval_cases(self, limit: int | None = None) -> list[dict[str, Any]]:
         """读取 Router eval case，用于离线回放。"""
+
+    def append_feedback_event(self, event: dict[str, Any]) -> None:
+        """写入一条人工纠错反馈事件。"""
+
+    def read_feedback_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """读取人工纠错反馈事件。"""
 
 
 def router_observability_enabled() -> bool:
@@ -140,10 +150,19 @@ class NullRouterObservabilitySink:
     def append_event(self, event: RouterEvent) -> None:
         return None
 
+    def read_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return []
+
     def append_eval_case(self, case: RouterEvalCase) -> None:
         return None
 
     def read_eval_cases(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return []
+
+    def append_feedback_event(self, event: dict[str, Any]) -> None:
+        return None
+
+    def read_feedback_events(self, limit: int | None = None) -> list[dict[str, Any]]:
         return []
 
 
@@ -155,6 +174,9 @@ class JsonlRouterObservabilitySink:
         records.append(event.as_dict())
         _write_jsonl(ROUTER_EVENTS_FILE, records[-_max_router_events():])
 
+    def read_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return _read_jsonl(ROUTER_EVENTS_FILE, limit or _max_router_events())
+
     def append_eval_case(self, case: RouterEvalCase) -> None:
         records = _read_jsonl(ROUTER_EVAL_CASES_FILE, _max_router_eval_cases())
         records.append(case.as_dict())
@@ -162,6 +184,14 @@ class JsonlRouterObservabilitySink:
 
     def read_eval_cases(self, limit: int | None = None) -> list[dict[str, Any]]:
         return _read_jsonl(ROUTER_EVAL_CASES_FILE, limit or _max_router_eval_cases())
+
+    def append_feedback_event(self, event: dict[str, Any]) -> None:
+        records = _read_jsonl(ROUTER_FEEDBACK_FILE, _max_router_eval_cases())
+        records.append(event)
+        _write_jsonl(ROUTER_FEEDBACK_FILE, records[-_max_router_eval_cases():])
+
+    def read_feedback_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return _read_jsonl(ROUTER_FEEDBACK_FILE, limit or _max_router_eval_cases())
 
 
 class KafkaSpoolRouterObservabilitySink:
@@ -191,11 +221,20 @@ class KafkaSpoolRouterObservabilitySink:
         records.append(payload)
         _write_jsonl(ROUTER_KAFKA_SPOOL_FILE, records[-_max_router_events():])
 
+    def read_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return JsonlRouterObservabilitySink().read_events(limit)
+
     def append_eval_case(self, case: RouterEvalCase) -> None:
         JsonlRouterObservabilitySink().append_eval_case(case)
 
     def read_eval_cases(self, limit: int | None = None) -> list[dict[str, Any]]:
         return JsonlRouterObservabilitySink().read_eval_cases(limit)
+
+    def append_feedback_event(self, event: dict[str, Any]) -> None:
+        JsonlRouterObservabilitySink().append_feedback_event(event)
+
+    def read_feedback_events(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return JsonlRouterObservabilitySink().read_feedback_events(limit)
 
 
 def resolve_router_observability_sink() -> RouterObservabilitySink:
