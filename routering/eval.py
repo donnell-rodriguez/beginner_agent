@@ -5,6 +5,31 @@ from typing import Any
 from .models import RouterDecision
 
 
+def classify_router_eval_failure(mismatches: list[str]) -> str:
+    """给 Router eval 失败做粗粒度归因。
+
+    中文注释：
+    大厂 eval 不会只说 failed。
+    它至少要知道失败主要发生在哪一层：
+    - intent_mismatch：任务类型错。
+    - risk_mismatch：风险等级错，通常最影响安全。
+    - tool_need_mismatch：是否需要工具判断错。
+    - multi_field_mismatch：多个字段同时错。
+    """
+
+    if not mismatches:
+        return "none"
+    if len(mismatches) > 1:
+        return "multi_field_mismatch"
+    if mismatches[0] == "task_type":
+        return "intent_mismatch"
+    if mismatches[0] == "risk_level":
+        return "risk_mismatch"
+    if mismatches[0] == "needs_tool":
+        return "tool_need_mismatch"
+    return "unknown_mismatch"
+
+
 def evaluate_router_prediction(
     case: dict[str, Any],
     decision: RouterDecision,
@@ -26,16 +51,20 @@ def evaluate_router_prediction(
         "needs_tool": decision.needs_tool == case.get("expected_needs_tool"),
     }
     mismatches = [name for name, ok in checks.items() if not ok]
+    failure_category = classify_router_eval_failure(mismatches)
     return {
         "passed": not mismatches,
         "checks": checks,
         "mismatches": mismatches,
+        "failure_category": failure_category,
         "expected": {
             "task_type": case.get("expected_task_type"),
             "risk_level": case.get("expected_risk_level"),
             "needs_tool": case.get("expected_needs_tool"),
         },
         "actual": decision.model_dump(mode="json"),
+        "user_input": case.get("user_input", ""),
+        "case_reason": case.get("reason", ""),
     }
 
 
@@ -44,9 +73,22 @@ def summarize_router_eval_results(results: list[dict[str, Any]]) -> dict[str, An
 
     total = len(results)
     passed = sum(1 for item in results if item.get("passed") is True)
+    task_type_passed = sum(1 for item in results if item.get("checks", {}).get("task_type") is True)
+    risk_passed = sum(1 for item in results if item.get("checks", {}).get("risk_level") is True)
+    tool_passed = sum(1 for item in results if item.get("checks", {}).get("needs_tool") is True)
+    failure_categories: dict[str, int] = {}
+    for item in results:
+        category = str(item.get("failure_category", "unknown_mismatch"))
+        if category == "none":
+            continue
+        failure_categories[category] = failure_categories.get(category, 0) + 1
     return {
         "total": total,
         "passed": passed,
         "failed": total - passed,
         "pass_rate": passed / total if total else 0.0,
+        "task_type_accuracy": task_type_passed / total if total else 0.0,
+        "risk_level_accuracy": risk_passed / total if total else 0.0,
+        "needs_tool_accuracy": tool_passed / total if total else 0.0,
+        "failure_categories": failure_categories,
     }

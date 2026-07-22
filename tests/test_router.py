@@ -7,6 +7,15 @@ from beginner_agent.routering.eval import (
     evaluate_router_prediction,
     summarize_router_eval_results,
 )
+from beginner_agent.routering.eval_models import RouterEvalDataset
+from beginner_agent.routering.eval_runner import (
+    append_router_eval_trend,
+    append_router_feedback,
+    load_router_eval_dataset,
+    make_feedback_record,
+    read_router_eval_trends,
+    run_router_eval,
+)
 from beginner_agent.routering.models import RouterEvalCase
 from beginner_agent.routering.observability import (
     append_router_eval_case,
@@ -22,6 +31,7 @@ def isolated_router_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Router 测试使用独立文件，避免污染本地 .agent_state。"""
 
     import beginner_agent.routering.sinks as sinks
+    import beginner_agent.routering.eval_runner as eval_runner
 
     router_dir = tmp_path / "router"
     monkeypatch.setenv("BEGINNER_AGENT_ROUTER_OBSERVABILITY_ENABLED", "true")
@@ -34,6 +44,11 @@ def isolated_router_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         router_dir / "router_eval_cases.jsonl",
     )
     monkeypatch.setattr(sinks, "ROUTER_KAFKA_SPOOL_FILE", router_dir / "router_kafka_spool.jsonl")
+    monkeypatch.setattr(
+        eval_runner,
+        "ROUTER_EVAL_TRENDS_FILE",
+        router_dir / "router_eval_trends.jsonl",
+    )
 
 
 def test_router_parses_string_false_as_false(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -526,3 +541,133 @@ def test_router_eval_prediction_scores_decision() -> None:
 
     assert result["passed"] is True
     assert summary["pass_rate"] == 1.0
+    assert summary["task_type_accuracy"] == 1.0
+
+
+def test_router_eval_batch_replay_and_failure_attribution() -> None:
+    """批量 replay 会生成 run 指标、字段准确率和失败归因。"""
+
+    dataset = RouterEvalDataset(
+        version="router-eval-test-v1",
+        source="unit-test",
+        cases=(
+            {
+                "user_input": "你好",
+                "expected_task_type": "chat",
+                "expected_risk_level": "low",
+                "expected_needs_tool": False,
+                "reason": "普通问答。",
+            },
+            {
+                "user_input": "帮我修改代码",
+                "expected_task_type": "agent",
+                "expected_risk_level": "high",
+                "expected_needs_tool": True,
+                "reason": "代码修改要进入 agent。",
+            },
+        ),
+    )
+
+    def predict(user_input: str) -> router.RouterDecision:
+        if "修改代码" in user_input:
+            return router.RouterDecision(
+                task_type="chat",
+                risk_level="low",
+                needs_tool=False,
+                reason="故意模拟错误预测。",
+            )
+        return router.RouterDecision(
+            task_type="chat",
+            risk_level="low",
+            needs_tool=False,
+            reason="普通问答。",
+        )
+
+    run = run_router_eval(dataset, predict, router_version="router-test")
+
+    assert run.dataset_version == "router-eval-test-v1"
+    assert run.total == 2
+    assert run.passed == 1
+    assert run.failed == 1
+    assert run.pass_rate == 0.5
+    assert run.failures[0].failure_category == "multi_field_mismatch"
+
+
+def test_router_eval_loads_versioned_dataset_from_json(tmp_path) -> None:
+    """Router eval dataset 支持带 version 的 JSON 文件。"""
+
+    dataset_path = tmp_path / "router_eval.json"
+    dataset_path.write_text(
+        """
+        {
+          "version": "dataset-v20260722",
+          "cases": [
+            {
+              "user_input": "帮我修复测试",
+              "expected_task_type": "agent",
+              "expected_risk_level": "high",
+              "expected_needs_tool": true
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    dataset = load_router_eval_dataset(dataset_path)
+
+    assert dataset.version == "dataset-v20260722"
+    assert dataset.source == str(dataset_path)
+    assert len(dataset.cases) == 1
+
+
+def test_router_eval_trend_roundtrip() -> None:
+    """Router eval run 会写入趋势文件，方便后续看准确率变化。"""
+
+    dataset = RouterEvalDataset(
+        version="trend-dataset",
+        cases=(
+            {
+                "user_input": "你好",
+                "expected_task_type": "chat",
+                "expected_risk_level": "low",
+                "expected_needs_tool": False,
+            },
+        ),
+    )
+    run = run_router_eval(
+        dataset,
+        lambda _: router.RouterDecision(
+            task_type="chat",
+            risk_level="low",
+            needs_tool=False,
+            reason="ok",
+        ),
+        router_version="router-trend-test",
+    )
+
+    append_router_eval_trend(run)
+    trends = read_router_eval_trends()
+
+    assert trends[-1]["dataset_version"] == "trend-dataset"
+    assert trends[-1]["pass_rate"] == 1.0
+
+
+def test_router_eval_feedback_flows_into_eval_cases() -> None:
+    """线上反馈可以沉淀为 eval case，进入后续 replay。"""
+
+    record = make_feedback_record(
+        user_input="请修复 pytest",
+        expected_task_type="agent",
+        expected_risk_level="high",
+        expected_needs_tool=True,
+        reason="代码修复必须进入 agent。",
+        source="unit_test_feedback",
+    )
+
+    case = append_router_feedback(record)
+    cases = read_router_eval_cases()
+
+    assert case.expected_task_type == "agent"
+    assert cases[-1]["user_input"] == "请修复 pytest"
+    assert cases[-1]["reason"].startswith("unit_test_feedback")
