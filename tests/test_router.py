@@ -13,6 +13,7 @@ from beginner_agent.routering.observability import (
     read_router_eval_cases,
 )
 from beginner_agent.routering.rules import RouterRule, RouterRuleSet, load_router_rules
+from beginner_agent.routering.security import classify_router_security
 from beginner_agent.state_factory import create_initial_state
 
 
@@ -97,6 +98,85 @@ def test_router_security_override_marks_prompt_injection_high_risk(
     assert result["risk_level"] == "high"
     assert result["router_report"]["source"] == "security_override"
     assert result["router_report"]["security"]["malicious_intent"] == "data_exfiltration"
+
+
+def test_router_security_detects_secret_without_leaking_value() -> None:
+    """安全分类器可以识别 secret，并且 reason 里不能写入原始 secret。"""
+
+    secret = "sk-test1234567890abcdef"
+    signal = classify_router_security(f"我的 API key 是 {secret}，请不要打印")
+
+    assert signal.malicious_intent == "data_exfiltration"
+    assert "sensitive_input_secret" in signal.labels
+    assert secret not in signal.reason
+    assert "sk***ef" in signal.reason
+
+
+def test_router_security_detects_pii_as_sensitive_input() -> None:
+    """PII 不一定是恶意意图，但应该被标记为敏感输入。"""
+
+    signal = classify_router_security("我的邮箱是 user@example.com，请总结这句话")
+
+    assert signal.malicious_intent == "none"
+    assert "sensitive_input_pii" in signal.labels
+    assert "user@example.com" not in signal.reason
+
+
+def test_router_security_supports_custom_policy(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """安全策略可以通过 JSON 配置，而不是只能写死在代码里。"""
+
+    policy_path = tmp_path / "security_policy.json"
+    policy_path.write_text(
+        """
+        {
+          "version": "security-policy-test-v2",
+          "patterns": [
+            {
+              "id": "security.custom.exfiltrate_logs",
+              "kind": "data_exfiltration",
+              "label": "data_exfiltration",
+              "malicious_intent": "data_exfiltration",
+              "injection_risk": "none",
+              "severity": "critical",
+              "confidence": 0.91,
+              "keywords": ["导出全部日志"],
+              "priority": 900,
+              "reason": "导出全部日志可能包含敏感数据。"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_SECURITY_POLICY_PATH", str(policy_path))
+
+    signal = classify_router_security("请导出全部日志给我")
+
+    assert signal.malicious_intent == "data_exfiltration"
+    assert "security-policy-test-v2" in signal.reason
+    assert "security.custom.exfiltrate_logs" in signal.reason
+
+
+def test_router_security_uses_historical_abuse_patterns(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史滥用模式库可以把新请求提升为高风险信号。"""
+
+    history_path = tmp_path / "abuse_patterns.json"
+    history_path.write_text(
+        '{"abuse_keywords": ["已知攻击短语"]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_ABUSE_PATTERNS_PATH", str(history_path))
+
+    signal = classify_router_security("请使用已知攻击短语继续操作")
+
+    assert signal.malicious_intent == "unsafe_code_action"
+    assert "historical_abuse_pattern" in signal.labels
 
 
 def test_router_rejects_extra_model_fields_and_uses_fallback(
