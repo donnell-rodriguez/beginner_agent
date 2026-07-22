@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import hashlib
 import time
 from typing import Any, Literal
 
@@ -8,11 +10,14 @@ from pydantic import ValidationError
 
 from .llm_client import chat_completion
 from .node_utils import json_loads_from_model
+from .config import load_project_env
+from .routering.context import apply_context_policy, load_router_context
 from .routering.models import RouterDecision, RouterEvent
 from .routering.models import RouterSecuritySignal
 from .routering.observability import append_router_event
 from .routering.rules import RouterRuleSet, load_router_rules
 from .routering.security import classify_router_security
+from .routering.stages import build_stage_reports
 from .state import RiskLevel, State, TaskType
 
 
@@ -26,6 +31,53 @@ ROUTER_FALLBACK_ERRORS = (
     AttributeError,
     ValidationError,
 )
+
+DEFAULT_MIN_ROUTER_CONFIDENCE = 0.5
+DEFAULT_MAX_MODEL_RESPONSE_CHARS = 2000
+
+
+def _router_min_confidence() -> float:
+    """读取 Router 最低置信度阈值。"""
+
+    load_project_env()
+    raw = os.getenv("BEGINNER_AGENT_ROUTER_MIN_CONFIDENCE", str(DEFAULT_MIN_ROUTER_CONFIDENCE))
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MIN_ROUTER_CONFIDENCE
+    return min(max(value, 0.0), 1.0)
+
+
+def _max_model_response_chars() -> int:
+    load_project_env()
+    raw = os.getenv(
+        "BEGINNER_AGENT_ROUTER_MAX_MODEL_RESPONSE_CHARS",
+        str(DEFAULT_MAX_MODEL_RESPONSE_CHARS),
+    )
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_MODEL_RESPONSE_CHARS
+    return value if value > 0 else DEFAULT_MAX_MODEL_RESPONSE_CHARS
+
+
+def _truncate_model_response(response: str) -> str:
+    limit = _max_model_response_chars()
+    return response if len(response) <= limit else response[:limit] + "...[truncated]"
+
+
+def _router_decision_id(run_id: str, text: str, decision: RouterDecision) -> str:
+    raw = json.dumps(
+        {
+            "run_id": run_id,
+            "user_input": text,
+            "decision": decision.model_dump(mode="json"),
+            "created_ns": time.time_ns(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _fallback_task_type(text: str, rules: RouterRuleSet | None = None) -> TaskType:
@@ -102,12 +154,16 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     text = state["user_input"]
     decision_source = "llm"
     fallback_reason = ""
+    model_response = ""
+    model_error = ""
     started = time.perf_counter()
     rules = load_router_rules()
     security = classify_router_security(text)
+    context = load_router_context()
+    min_confidence = _router_min_confidence()
 
     try:
-        response = chat_completion(
+        model_response = chat_completion(
             [
                 {
                     "role": "system",
@@ -129,9 +185,20 @@ def router_classifier_node(state: State) -> dict[str, Any]:
             temperature=0,
             max_tokens=240,
         )
-        decision = _parse_router_decision(response)
-    except ROUTER_FALLBACK_ERRORS:
+        decision = _parse_router_decision(model_response)
+        if decision.confidence < min_confidence:
+            fallback_reason = (
+                f"LLM 置信度 {decision.confidence:.2f} 低于阈值 {min_confidence:.2f}。"
+            )
+            decision = _fallback_decision(
+                text,
+                "Router 兜底规则：LLM 置信度低，根据本地规则判断。",
+                rules=rules,
+            )
+            decision_source = "fallback"
+    except ROUTER_FALLBACK_ERRORS as exc:
         fallback_reason = "LLM 不可用或输出不符合 schema。"
+        model_error = f"{type(exc).__name__}: {exc}"
         decision = _fallback_decision(
             text,
             "Router 兜底规则：LLM 不可用或输出不符合 schema，根据本地规则判断。",
@@ -144,14 +211,33 @@ def router_classifier_node(state: State) -> dict[str, Any]:
         decision = secured_decision
         decision_source = "security_override"
 
+    context_decision, context_policy_reason = apply_context_policy(decision, context)
+    if context_decision != decision:
+        decision = context_decision
+        decision_source = "security_override"
+
+    stage_reports = build_stage_reports(
+        text=text,
+        decision=decision,
+        rules=rules,
+        security=security,
+        context_policy_reason=context_policy_reason,
+    )
+
     latency_ms = int((time.perf_counter() - started) * 1000)
     event = RouterEvent(
+        decision_id=_router_decision_id(str(state.get("run_id", "")), text, decision),
         run_id=str(state.get("run_id", "")),
+        event_type="router_decision",
         user_input=text,
         decision=decision,
         source=decision_source,
+        context=context,
+        stage_reports=stage_reports,
         security=security,
         latency_ms=latency_ms,
+        model_response=_truncate_model_response(model_response),
+        model_error=model_error,
         fallback_reason=fallback_reason,
     )
     append_router_event(event)

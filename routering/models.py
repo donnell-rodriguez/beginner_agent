@@ -69,6 +69,58 @@ class RouterSecuritySignal:
 
 
 @dataclass(frozen=True)
+class RouterContext:
+    """Router 的租户/工作区/项目/用户上下文。
+
+    中文注释：
+    大厂系统里，Router 决策通常不是“所有用户一套规则”。
+    不同 tenant / workspace / project / user 可能有不同安全策略。
+    本地项目先把这些字段记录进事件里，并支持策略提升风险。
+    """
+
+    tenant_id: str
+    workspace_id: str
+    project_id: str
+    user_id: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "tenant_id": self.tenant_id,
+            "workspace_id": self.workspace_id,
+            "project_id": self.project_id,
+            "user_id": self.user_id,
+        }
+
+
+@dataclass(frozen=True)
+class RouterStageReport:
+    """多级 Router 子决策报告。
+
+    中文注释：
+    真正生产级 Router 通常会拆成多级：
+    - intent：用户想做什么。
+    - risk：风险等级。
+    - tool_needs：是否需要工具。
+    - security：是否命中恶意/注入风险。
+
+    这里先用结构化报告把每级判断记录下来。
+    """
+
+    stage: str
+    decision: str
+    reason: str
+    confidence: float = 0.7
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "decision": self.decision,
+            "reason": self.reason,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass(frozen=True)
 class RouterEvent:
     """Router 可观测事件。
 
@@ -80,23 +132,35 @@ class RouterEvent:
     - 有没有安全信号命中？
     """
 
+    decision_id: str
     run_id: str
+    event_type: str
     user_input: str
     decision: RouterDecision
     source: DecisionSource
+    context: RouterContext
+    stage_reports: list[RouterStageReport]
     security: RouterSecuritySignal
     latency_ms: int
+    model_response: str = ""
+    model_error: str = ""
     fallback_reason: str = ""
     created_at: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "decision_id": self.decision_id,
             "run_id": self.run_id,
+            "event_type": self.event_type,
             "user_input": self.user_input,
             "decision": self.decision.model_dump(mode="json"),
             "source": self.source,
+            "context": self.context.as_dict(),
+            "stage_reports": [report.as_dict() for report in self.stage_reports],
             "security": self.security.as_dict(),
             "latency_ms": self.latency_ms,
+            "model_response": self.model_response,
+            "model_error": self.model_error,
             "fallback_reason": self.fallback_reason,
             "created_at": self.created_at
             or datetime.now(timezone.utc).isoformat(),

@@ -175,7 +175,62 @@ def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> N
     ]
 
     assert result["router_report"]["source"] == "llm"
+    assert result["router_report"]["decision_id"]
+    assert result["router_report"]["event_type"] == "router_decision"
+    assert result["router_report"]["model_response"]
+    assert result["router_report"]["latency_ms"] >= 0
+    assert result["router_report"]["context"]["project_id"] == "beginner_agent"
+    assert {item["stage"] for item in result["router_report"]["stage_reports"]} == {
+        "intent",
+        "risk",
+        "tool_needs",
+        "security",
+        "context_policy",
+    }
     assert records
+
+
+def test_router_low_confidence_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM 置信度太低时，即使 JSON 合法，也要回到本地规则。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_MIN_CONFIDENCE", "0.8")
+    monkeypatch.setattr(
+        router,
+        "chat_completion",
+        lambda *args, **kwargs: (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"不确定","confidence":0.2}'
+        ),
+    )
+
+    result = router.router_classifier_node(create_initial_state("帮我读取 graph.py 源码"))
+
+    assert result["task_type"] == "agent"
+    assert result["router_report"]["source"] == "fallback"
+    assert "置信度" in result["router_report"]["fallback_reason"]
+
+
+def test_router_context_policy_can_raise_risk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tenant/project/user 维度策略可以把请求提升为高风险。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_PROJECT_ID", "sensitive-project")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_HIGH_RISK_PROJECTS", "sensitive-project")
+    monkeypatch.setattr(
+        router,
+        "chat_completion",
+        lambda *args, **kwargs: (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"普通问答","confidence":0.9}'
+        ),
+    )
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+
+    assert result["task_type"] == "agent"
+    assert result["risk_level"] == "high"
+    assert result["needs_tool"] is True
+    assert result["router_report"]["context"]["project_id"] == "sensitive-project"
+    assert result["router_report"]["stage_reports"][-1]["decision"] == "high_risk_override"
 
 
 def test_router_eval_case_roundtrip() -> None:
