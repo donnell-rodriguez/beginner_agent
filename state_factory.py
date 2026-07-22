@@ -30,6 +30,7 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
         "risk_level": "low",
         "needs_tool": False,
         "route_reason": "",
+        "router_report": {},
         "next_action": "schedule",
         "draft": "",
         "final_answer": "",

@@ -376,6 +376,18 @@ class State(TypedDict):
     route_reason: str
 
     # 中文注释：
+    # router_report 保存 Router 的结构化观测信息。
+    #
+    # 它会记录：
+    # - 本次决策来自 LLM / fallback / security_override。
+    # - Router 花了多久。
+    # - 是否命中 prompt injection / 数据外泄 / 高风险动作。
+    # - 最终 task_type / risk_level / needs_tool。
+    #
+    # 这让后续排查“为什么任务走到某个分支”时有证据可看。
+    router_report: dict[str, Any]
+
+    # 中文注释：
     # 当前复杂 agent 下一步应该走哪个模块。
     #
     # schedule：回到 Scheduler 选择任务。
