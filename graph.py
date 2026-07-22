@@ -51,9 +51,9 @@ from .state import State
 # graph.py 只负责“编排节点和边”。
 #
 # 具体智能逻辑不要堆在这里：
-# - router.py 负责任务分类和风险判断。
-# - memory.py 负责轻量记忆读取和写入。
-# - memory_compaction.py 负责压缩长期记忆，避免检索越来越慢。
+# - routering/nodes.py 负责任务分类和风险判断。
+# - memory/nodes.py 负责轻量记忆读取和写入。
+# - memory/compaction.py 负责压缩长期记忆，避免检索越来越慢。
 # - scheduler.py 负责 agenda / task_tree 调度。
 # - planner.py 负责拆解任务，tool_selector_node 负责选择工具。
 # - plan_validator.py 负责计划质量和工具参数可执行性检查。

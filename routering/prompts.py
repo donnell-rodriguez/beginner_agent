@@ -13,7 +13,7 @@ from ..config import load_project_env
 # 中文注释：
 # prompts.py 是 Router prompt registry。
 #
-# 生产级系统通常不会把 prompt 直接写死在 router.py 里，
+# 生产级系统通常不会把 prompt 直接写死在 routering/nodes.py 里，
 # 而是把 prompt 当成“可治理资产”：
 # - version：知道当前用的是哪一版。
 # - experiment_group：支持 A/B 或灰度实验。

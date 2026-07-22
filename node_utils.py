@@ -184,7 +184,7 @@ def fallback_subtasks(task: dict[str, Any], state: State) -> list[dict[str, Any]
         "README.md",
         "state.py",
         "graph.py",
-        "router.py",
+        "routering/nodes.py",
         "scheduler.py",
         "planner.py",
         "plan_validator.py",

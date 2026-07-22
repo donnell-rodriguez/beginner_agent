@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from beginner_agent import router
+from beginner_agent.routering import nodes as router
 from beginner_agent.routering.eval import (
     evaluate_router_prediction,
     summarize_router_eval_results,

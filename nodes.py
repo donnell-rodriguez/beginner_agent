@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # 中文注释：
 # 这个文件现在只是节点导出入口。
-# 真正的实现已经按职责拆到 router/scheduler/planner 等模块里。
+# 真正的实现已经按职责拆到 routering/scheduler/planner 等模块里。
 
 from .approval import approval_interrupt_node, route_after_approval_interrupt
 from .artifacts import artifact_collector_node
@@ -25,7 +25,7 @@ from .plan_validator import plan_validator_node, route_after_plan_validator
 from .planner import planner_decomposer_node, route_after_planner, tool_selector_node
 from .policy import route_after_policy, tool_policy_node
 from .recovery import recovery_planner_node, route_after_recovery_planner
-from .router import route_by_task, router_classifier_node
+from .routering.nodes import route_by_task, router_classifier_node
 from .sandbox import route_after_sandbox_runner, sandbox_runner_node
 from .scheduler import route_after_scheduler, scheduler_node
 from .simple_nodes import (

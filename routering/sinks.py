@@ -18,7 +18,7 @@ from .models import RouterEvalCase, RouterEvent
 #
 # 现在改成 sink 结构：
 #
-#     router.py
+#     routering/nodes.py
 #       -> observability.append_router_event(...)
 #       -> resolve_router_observability_sink()
 #       -> Jsonl / Null / KafkaSpool sink

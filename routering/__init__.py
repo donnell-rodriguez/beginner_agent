@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .context import apply_context_policy, load_router_context
 from .models import RouterDecision, RouterEvalCase, RouterEvent, RouterSecuritySignal
+from .nodes import route_by_task, router_classifier_node
 from .multistage import (
     MultiStageRouterResult,
     RouterStageDecision,
@@ -60,6 +61,8 @@ __all__ = [
     "RouterRuleSet",
     "RouterStageDecision",
     "RouterSecuritySignal",
+    "route_by_task",
+    "router_classifier_node",
     "MultiStageRouterResult",
     "RuleDecision",
     "RuleMatch",

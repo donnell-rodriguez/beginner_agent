@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from beginner_agent.router import router_classifier_node
+from beginner_agent.routering.nodes import router_classifier_node
 from beginner_agent.routering.eval_runner import (
     append_router_eval_trend,
     append_router_feedback,
@@ -33,7 +33,7 @@ from beginner_agent.state_factory import create_initial_state
 #       --task-type agent --risk-level high --needs-tool true --reason "这次应该进入 code agent"
 #   PYTHONPATH=.. uv run python scripts/router_eval.py trends --limit 10
 #
-# 它不放在 router.py 里，是为了让业务节点保持干净。
+# 它不放在 routering/nodes.py 里，是为了让业务节点保持干净。
 
 
 def _predict_with_router(user_input: str) -> RouterDecision:

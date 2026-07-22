@@ -19,12 +19,12 @@ from .sinks import (
 #
 # 你可以把它理解成“业务 API 层”：
 #
-#     router.py 调用 append_router_event(...)
+#     routering/nodes.py 调用 append_router_event(...)
 #       -> observability.py 选择当前 sink
 #       -> sinks.py 负责具体写入 JSONL / Null / Kafka spool
 #
 # 这样以后要接 Kafka、OpenTelemetry、HTTP Collector，
-# 不需要修改 router.py，只需要新增一个 sink 实现。
+# 不需要修改 routering/nodes.py，只需要新增一个 sink 实现。
 
 
 logger = logging.getLogger(__name__)

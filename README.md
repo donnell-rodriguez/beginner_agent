@@ -106,7 +106,7 @@ START
 位置：
 
 ```text
-router.py -> router_classifier_node(...)
+routering/nodes.py -> router_classifier_node(...)
 ```
 
 职责：
@@ -990,7 +990,7 @@ graph.py           组装 LangGraph 节点、边、条件边和 MemorySaver
 state.py           定义复杂 agent 共享的 State
 nodes.py           节点导出入口，graph.py 从这里统一导入节点
 
-router.py          Router / Classifier
+routering/nodes.py Router / Classifier
 scheduler.py       Scheduler / Agenda Manager
 planner.py         Planner / Decomposer
 plan_validator.py  Plan Validator

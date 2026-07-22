@@ -14,8 +14,76 @@ from ..models import DecisionSource, RouterDecision
 # 它们服务 intent/risk/tool/security 子阶段，不直接负责 graph 路由。
 
 StageName = Literal["intent_router", "risk_router", "tool_needs_router", "security_router"]
+
+# 中文注释：
+# StageModelT 是一个“泛型类型变量”。
+#
+# 从语法上看：
+#
+#     TypeVar("StageModelT", bound=BaseModel)
+#
+# 可以拆成三层理解：
+#
+# 1. TypeVar(...)
+#    定义一个临时的类型占位符。
+#    它不是运行时业务数据，而是给类型检查器看的。
+#
+# 2. "StageModelT"
+#    这是这个类型变量的名字。
+#    通常名字后面带 T，表示 Type。
+#
+# 3. bound=BaseModel
+#    表示 StageModelT 只能代表 BaseModel 或 BaseModel 的子类。
+#    也就是说，它可以是 IntentStageModel / RiskStageModel / ToolNeedsStageModel，
+#    但不能是普通 str、dict、int。
+#
+# 为什么这里需要它？
+#
+# 在 repair.py 里有一个通用函数：
+#
+#     parse_stage_model_with_repair(..., model_cls: type[StageModelT]) -> tuple[StageModelT, RepairInfo]
+#
+# 当你传入 IntentStageModel 时，返回值里的 parsed 就会被类型系统理解为 IntentStageModel。
+# 当你传入 RiskStageModel 时，返回值里的 parsed 就会被理解为 RiskStageModel。
+#
+# 这比直接写 BaseModel 更精确：
+#
+#     不够精确：返回 BaseModel，后面访问 parsed.task_type 类型检查器不一定知道。
+#     更精确：返回 StageModelT，传入什么模型类，就返回什么模型实例。
 StageModelT = TypeVar("StageModelT", bound=BaseModel)
 
+# 中文注释：
+# ROUTER_DECISION_FIELDS 是“Router 子阶段允许输出的字段白名单”。
+#
+# frozenset(...) 可以理解成“不可修改的 set”：
+#
+#     普通 set：
+#         fields = {"task_type", "risk_level"}
+#         fields.add("extra")  # 可以继续修改
+#
+#     frozenset：
+#         fields = frozenset({"task_type", "risk_level"})
+#         fields.add("extra")  # 会报错，因为它是不可变的
+#
+# 为什么这里用 frozenset？
+#
+# 因为这些字段是固定协议：
+# - task_type
+# - risk_level
+# - needs_tool
+# - reason
+# - confidence
+#
+# 后面 repair.py 会用它检查模型输出：
+#
+#     extra = set(data) - ROUTER_DECISION_FIELDS
+#
+# 这句话的意思是：
+#
+#     模型实际返回的字段 - 允许字段白名单 = 多余字段
+#
+# 如果 extra 不为空，说明 LLM 返回了未治理字段，
+# 系统就会进入 repair 或 fallback，避免脏字段混进 Router 决策。
 ROUTER_DECISION_FIELDS = frozenset(
     {
         "task_type",

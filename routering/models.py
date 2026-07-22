@@ -14,7 +14,7 @@ from ..state import RiskLevel, TaskType
 #
 # 你可以把它理解成“Router 这个 node 相关的数据合同”：
 #
-#     router.py 负责做事情
+#     routering/nodes.py 负责做事情
 #     models.py 负责定义事情产生的数据长什么样
 #
 # 对于每个 node 来说，先定义清楚数据结构很重要：
@@ -88,7 +88,7 @@ class RouterDecision(BaseModel):
 
     # 中文注释：
     # confidence 是 Router 对自己判断的置信度。
-    # router.py 里会用它做低置信度 fallback。
+    # routering/nodes.py 里会用它做低置信度 fallback。
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
     @field_validator("reason")
