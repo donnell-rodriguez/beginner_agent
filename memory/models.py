@@ -6,7 +6,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .memory_settings import (
+from .settings import (
     DEFAULT_PROJECT_ID,
     DEFAULT_TENANT_ID,
     DEFAULT_USER_ID,

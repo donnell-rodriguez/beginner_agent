@@ -5,13 +5,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .failure_memory import failure_rerank_signal
-from .memory_audit import _build_audit_event
-from .memory_eval_cases import evaluate_retrieval_case, read_memory_eval_cases
-from .memory_jsonl_store import JsonlMemoryStore
-from .memory_judge import cross_encoder_rerank_score
-from .memory_models import MemoryRecord
-from .memory_policy import (
+from .failure import failure_rerank_signal
+from .audit import _build_audit_event
+from .eval_cases import evaluate_retrieval_case, read_memory_eval_cases
+from .jsonl_store import JsonlMemoryStore
+from .judge import cross_encoder_rerank_score
+from .models import MemoryRecord
+from .policy import (
     _dedupe_contradiction_records,
     _memory_access_context,
     _preference_memory_records_for_context,
@@ -23,12 +23,12 @@ from .memory_policy import (
     _record_visible_to_context,
     _scope_matches_state,
 )
-from .memory_settings import MAX_MEMORY_RECORDS, MAX_RERANK_CANDIDATES, MAX_RETRIEVED_RECORDS, MIN_RERANK_SCORE
-from .memory_store import _configured_store, _upsert_memory_audit_event, _upsert_memory_record
-from .memory_rerank_observability import append_rerank_telemetry, rerank_ab_bucket
-from .preference_memory import default_preference_payloads, preference_rerank_signal
-from .privacy_governance import memory_prompt_allowed_by_privacy
-from .state import State
+from .settings import MAX_MEMORY_RECORDS, MAX_RERANK_CANDIDATES, MAX_RETRIEVED_RECORDS, MIN_RERANK_SCORE
+from .store import _configured_store, _upsert_memory_audit_event, _upsert_memory_record
+from .rerank_observability import append_rerank_telemetry, rerank_ab_bucket
+from .preference import default_preference_payloads, preference_rerank_signal
+from ..privacy_governance import memory_prompt_allowed_by_privacy
+from ..state import State
 
 def _query_text_for_state(state: State) -> str:
     """构造 Memory Retriever 的向量查询文本。"""

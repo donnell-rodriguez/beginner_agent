@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from .memory_settings import (
+from .settings import (
     MAX_MEMORY_FEEDBACK_EVENTS,
     MEMORY_DIR,
     MEMORY_FEEDBACK_FILE,
 )
-from .tooling.core import ensure_state_dirs
+from ..tooling.core import ensure_state_dirs
 
 
 FeedbackSignal = Literal["useful", "not_useful", "harmful", "fixed_later", "confirmed"]

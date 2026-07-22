@@ -1,37 +1,37 @@
 from __future__ import annotations
 
 # 中文注释：
-# memory.py 现在是兼容导出层。
+# memory/__init__.py 现在是兼容导出层。
 # 真正实现已经按生产级职责拆到多个小模块里：
-# - memory_models.py：MemoryRecord / MemoryAuditEvent / 类型定义。
-# - memory_store.py：MemoryStore 协议、后端选择、写入治理。
-# - memory_postgres_store.py：Postgres + pgvector 实现。
-# - memory_jsonl_store.py：JSONL fallback 实现。
-# - memory_retrieval.py：召回、ACL 过滤、rerank。
-# - memory_policy.py：写入策略、TTL、ACL、隐私字段治理。
-# - memory_audit.py：审计事件构造。
-# - memory_nodes.py：LangGraph 节点。
-# - memory_feedback.py：人工/系统反馈闭环。
-# - memory_eval_cases.py：离线 retrieval eval case。
-# - memory_rerank_observability.py：rerank telemetry / A/B bucket。
+# - models.py：MemoryRecord / MemoryAuditEvent / 类型定义。
+# - store.py：MemoryStore 协议、后端选择、写入治理。
+# - postgres_store.py：Postgres + pgvector 实现。
+# - jsonl_store.py：JSONL fallback 实现。
+# - retrieval.py：召回、ACL 过滤、rerank。
+# - policy.py：写入策略、TTL、ACL、隐私字段治理。
+# - audit.py：审计事件构造。
+# - nodes.py：LangGraph 节点。
+# - feedback.py：人工/系统反馈闭环。
+# - eval_cases.py：离线 retrieval eval case。
+# - rerank_observability.py：rerank telemetry / A/B bucket。
 #
 # 这样外部旧代码仍然可以 from beginner_agent.memory import MemoryRecord，
-# 但 memory.py 不再承担所有实现细节。
+# 但单个大文件不再承担所有实现细节。
 
-from .memory_audit import _build_audit_event
-from .memory_eval_cases import MemoryEvalCase, append_memory_eval_case, read_memory_eval_cases
-from .memory_feedback import (
+from .audit import _build_audit_event
+from .eval_cases import MemoryEvalCase, append_memory_eval_case, read_memory_eval_cases
+from .feedback import (
     MemoryFeedbackEvent,
     append_memory_feedback,
     feedback_summary_for_memory,
     read_memory_feedback,
 )
-from .memory_jsonl_store import (
+from .jsonl_store import (
     JsonlMemoryStore,
     _read_jsonl_audit_events,
     _read_jsonl_memory_records,
 )
-from .memory_models import (
+from .models import (
     MemoryAuditAction,
     MemoryAuditEvent,
     MemoryKind,
@@ -46,14 +46,14 @@ from .memory_models import (
     ValidityStatus,
     memory_record_json_schema,
 )
-from .memory_nodes import memory_retriever_node, memory_writer_node, route_after_memory_writer
-from .memory_policy import (
+from .nodes import memory_retriever_node, memory_writer_node, route_after_memory_writer
+from .policy import (
     _memory_access_context,
     _safe_memory_value,
     _stable_memory_id,
 )
-from .memory_postgres_store import PostgresMemoryStore
-from .memory_settings import (
+from .postgres_store import PostgresMemoryStore
+from .settings import (
     DEFAULT_MEMORY_BACKEND,
     DEFAULT_MEMORY_TTL_DAYS,
     DEFAULT_PROJECT_ID,
@@ -78,12 +78,12 @@ from .memory_settings import (
     MEMORY_PROMOTION_SUCCESS_THRESHOLD,
     MIN_RERANK_SCORE,
 )
-from .memory_rerank_observability import (
+from .rerank_observability import (
     read_rerank_telemetry,
     rerank_ab_bucket,
     summarize_rerank_telemetry,
 )
-from .memory_store import (
+from .store import (
     MemoryStore,
     _configured_store,
     _upsert_memory_audit_event,

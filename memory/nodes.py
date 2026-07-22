@@ -3,14 +3,14 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .memory_audit import _build_audit_event
-from .memory_models import MemoryWriterRoute, memory_record_json_schema
-from .memory_policy import _build_memory_record, _memory_access_context, _memory_policy_for_pending, _safe_memory_value
-from .memory_retrieval import _preference_records_for_state, _retrieve_relevant_records, _seed_default_preference_memories
-from .memory_store import _upsert_memory_audit_event, _upsert_memory_record
-from .node_utils import goal_progress_snapshot
-from .preference_memory import default_preference_payloads, merged_preference_context
-from .state import State
+from .audit import _build_audit_event
+from .models import MemoryWriterRoute, memory_record_json_schema
+from .policy import _build_memory_record, _memory_access_context, _memory_policy_for_pending, _safe_memory_value
+from .retrieval import _preference_records_for_state, _retrieve_relevant_records, _seed_default_preference_memories
+from .store import _upsert_memory_audit_event, _upsert_memory_record
+from ..node_utils import goal_progress_snapshot
+from .preference import default_preference_payloads, merged_preference_context
+from ..state import State
 
 def memory_retriever_node(state: State) -> dict[str, object]:
     """Memory Retriever：在复杂 agent loop 开始前读取相关记忆。

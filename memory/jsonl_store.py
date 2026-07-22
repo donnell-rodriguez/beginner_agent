@@ -4,16 +4,16 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from .memory_models import MemoryAuditEvent, MemoryRecord, ValidityStatus
-from .memory_policy import _record_should_be_deleted
-from .memory_settings import (
+from .models import MemoryAuditEvent, MemoryRecord, ValidityStatus
+from .policy import _record_should_be_deleted
+from .settings import (
     MAX_MEMORY_AUDIT_EVENTS,
     MAX_MEMORY_RECORDS,
     MEMORY_AUDIT_FILE,
     MEMORY_DIR,
     MEMORY_FILE,
 )
-from .tooling.core import ensure_state_dirs
+from ..tooling.core import ensure_state_dirs
 
 def _ensure_memory_file() -> None:
     """确保 memory 存储文件存在。"""

@@ -6,10 +6,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .failure_memory import build_failure_memory_profile
-from .memory_models import MemoryKind, MemoryPolicyDecision, MemoryRecord, MemoryScope, SensitivityLevel
-from .memory_quality import MemoryEvaluator, adjusted_memory_fields
-from .memory_settings import (
+from .failure import build_failure_memory_profile
+from .models import MemoryKind, MemoryPolicyDecision, MemoryRecord, MemoryScope, SensitivityLevel
+from .quality import MemoryEvaluator, adjusted_memory_fields
+from .settings import (
     DEFAULT_MEMORY_TTL_DAYS,
     DEFAULT_PROJECT_ID,
     DEFAULT_TENANT_ID,
@@ -17,8 +17,8 @@ from .memory_settings import (
     DEFAULT_WORKSPACE_ID,
     MAX_MEMORY_TEXT_CHARS,
 )
-from .preference_memory import default_preference_payloads, is_preference_record, preference_metadata_from_pending
-from .privacy_governance import (
+from .preference import default_preference_payloads, is_preference_record, preference_metadata_from_pending
+from ..privacy_governance import (
     memory_prompt_allowed_by_privacy,
     privacy_metadata,
     redact_text_for_memory,
@@ -27,7 +27,7 @@ from .privacy_governance import (
     storage_summary_for_sensitive_memory,
     stronger_sensitivity,
 )
-from .state import State
+from ..state import State
 
 def _memory_ttl_days() -> int:
     """读取 TTL 记忆默认保留天数。"""
@@ -222,7 +222,7 @@ def _preference_records_for_state(state: State) -> tuple[list[dict[str, Any]], s
     # 中文注释：
     # _list_memory_records 在 retrieval 层。
     # 这里放在函数内部导入，是为了避免模块加载时互相 import。
-    from .memory_retrieval import _list_memory_records
+    from .retrieval import _list_memory_records
 
     records, backend, error = _list_memory_records()
     preferences = [

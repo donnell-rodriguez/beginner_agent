@@ -13,7 +13,7 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from beginner_agent.config import load_project_env  # noqa: E402
-from beginner_agent.memory_migrations import (  # noqa: E402
+from beginner_agent.memory.migrations import (  # noqa: E402
     backfill_memory_governance_fields,
     current_memory_schema_version,
     pending_memory_migrations,

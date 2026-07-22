@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .memory_settings import (
+from .settings import (
     MAX_MEMORY_EVAL_CASES,
     MEMORY_DIR,
     MEMORY_EVAL_CASES_FILE,
 )
-from .tooling.core import ensure_state_dirs
+from ..tooling.core import ensure_state_dirs
 
 
 @dataclass(frozen=True)

@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .memory_audit import _build_audit_event
-from .memory_jsonl_store import JsonlMemoryStore
-from .memory_models import MemoryAuditEvent, MemoryRecord, MemoryStore
-from .memory_policy import _safe_memory_value, _stable_memory_id
-from .memory_settings import MAX_MEMORY_RECORDS
-from .memory_store import _configured_store
-from .memory_compaction import compact_memories
-from .state_factory import create_initial_state
+from .audit import _build_audit_event
+from .jsonl_store import JsonlMemoryStore
+from .models import MemoryAuditEvent, MemoryRecord, MemoryStore
+from .policy import _safe_memory_value, _stable_memory_id
+from .settings import MAX_MEMORY_RECORDS
+from .store import _configured_store
+from .compaction import compact_memories
+from ..state_factory import create_initial_state
 
 
 DEFAULT_LIFECYCLE_SOURCE_LIMIT = 300

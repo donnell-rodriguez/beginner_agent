@@ -10,8 +10,8 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from beginner_agent.memory_models import MemoryRecord  # noqa: E402
-from beginner_agent.memory_postgres_store import PostgresMemoryStore  # noqa: E402
+from beginner_agent.memory.models import MemoryRecord  # noqa: E402
+from beginner_agent.memory.postgres_store import PostgresMemoryStore  # noqa: E402
 
 
 def main() -> None:

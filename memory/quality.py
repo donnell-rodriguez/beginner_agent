@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from .memory_feedback import feedback_summary_for_memory
-from .memory_judge import llm_judge_memory_quality
+from .feedback import feedback_summary_for_memory
+from .judge import llm_judge_memory_quality
 
 
 MemoryQualityDecision = Literal["store", "deprioritize", "reject"]

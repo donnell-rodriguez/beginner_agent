@@ -16,8 +16,8 @@ from .evaluator import (
 )
 from .execution_monitor import execution_monitor_node, route_after_execution_monitor
 from .executor import executor_node
-from .memory_nodes import memory_retriever_node, memory_writer_node, route_after_memory_writer
-from .memory_compaction import (
+from .memory.nodes import memory_retriever_node, memory_writer_node, route_after_memory_writer
+from .memory.compaction import (
     memory_compaction_node,
     route_after_memory_compaction,
 )

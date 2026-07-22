@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .config import load_project_env
-from .memory_lifecycle import LifecycleReport, run_memory_lifecycle_job
-from .memory_migrations import run_memory_migrations
-from .memory_settings import MEMORY_DIR, MEMORY_LIFECYCLE_RUNS_FILE
+from ..config import load_project_env
+from .lifecycle import LifecycleReport, run_memory_lifecycle_job
+from .migrations import run_memory_migrations
+from .settings import MEMORY_DIR, MEMORY_LIFECYCLE_RUNS_FILE
 
 
 JOB_NAME = "memory_lifecycle"

@@ -4,8 +4,8 @@ import hashlib
 import json
 from typing import Any
 
-from .memory_models import MemoryAuditAction, MemoryAuditEvent
-from .memory_policy import _safe_memory_value
+from .models import MemoryAuditAction, MemoryAuditEvent
+from .policy import _safe_memory_value
 
 def _stable_audit_id(event: dict[str, Any]) -> str:
     """为 audit event 生成稳定 ID。"""

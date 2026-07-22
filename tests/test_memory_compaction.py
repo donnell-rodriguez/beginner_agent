@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from beginner_agent import memory_compaction
+from beginner_agent.memory import compaction as memory_compaction
 from beginner_agent.state_factory import create_initial_state
 
 

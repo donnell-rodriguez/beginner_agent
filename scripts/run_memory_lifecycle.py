@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from beginner_agent.memory_lifecycle_scheduler import memory_lifecycle_scheduled_report_json
+from beginner_agent.memory.lifecycle_scheduler import memory_lifecycle_scheduled_report_json
 
 
 def main() -> None:

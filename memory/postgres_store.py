@@ -5,10 +5,10 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from .embeddings import safe_embedding, vector_to_sql
-from .memory_migrations import pending_memory_migrations, run_memory_migrations
-from .memory_models import MemoryAuditEvent, MemoryRecord, ValidityStatus
-from .memory_settings import MAX_INDEXED_VECTOR_DIMENSION, MAX_MEMORY_TEXT_CHARS
+from ..embeddings import safe_embedding, vector_to_sql
+from .migrations import pending_memory_migrations, run_memory_migrations
+from .models import MemoryAuditEvent, MemoryRecord, ValidityStatus
+from .settings import MAX_INDEXED_VECTOR_DIMENSION, MAX_MEMORY_TEXT_CHARS
 
 def _validate_embedding_dimension(dimension: int) -> None:
     """校验当前 pgvector 索引使用的向量维度。

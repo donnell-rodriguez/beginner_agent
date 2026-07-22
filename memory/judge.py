@@ -7,7 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .llm_client import OMLX_API_KEY, OMLX_BASE_URL, OMLX_MODEL
+from ..llm_client import OMLX_API_KEY, OMLX_BASE_URL, OMLX_MODEL
 
 
 JudgeDecision = Literal["use", "deprioritize", "reject"]

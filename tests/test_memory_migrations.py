@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from beginner_agent.memory_migrations import (
+from beginner_agent.memory.migrations import (
     MIGRATIONS,
     current_memory_schema_version,
     pending_memory_migrations,

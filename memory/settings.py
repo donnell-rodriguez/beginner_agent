@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .tooling.core import STATE_DIR
+from ..tooling.core import STATE_DIR
 
 # 中文注释：
 # memory_settings.py 只放 memory 系统的常量配置。

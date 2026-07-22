@@ -5,17 +5,17 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from beginner_agent.memory_audit import _build_audit_event
-from beginner_agent.memory_eval_cases import read_memory_eval_cases
-from beginner_agent.memory_feedback import feedback_summary_for_memory, read_memory_feedback
-from beginner_agent.memory_jsonl_store import JsonlMemoryStore, _read_jsonl_audit_events
-from beginner_agent.memory_postgres_store import PostgresMemoryStore
-from beginner_agent.memory_rerank_observability import (
+from beginner_agent.memory.audit import _build_audit_event
+from beginner_agent.memory.eval_cases import read_memory_eval_cases
+from beginner_agent.memory.feedback import feedback_summary_for_memory, read_memory_feedback
+from beginner_agent.memory.jsonl_store import JsonlMemoryStore, _read_jsonl_audit_events
+from beginner_agent.memory.postgres_store import PostgresMemoryStore
+from beginner_agent.memory.rerank_observability import (
     read_rerank_telemetry,
     summarize_rerank_telemetry,
 )
-from beginner_agent.memory_settings import MAX_MEMORY_AUDIT_EVENTS, MAX_MEMORY_RECORDS
-from beginner_agent.memory_store import _configured_store, _upsert_memory_audit_event
+from beginner_agent.memory.settings import MAX_MEMORY_AUDIT_EVENTS, MAX_MEMORY_RECORDS
+from beginner_agent.memory.store import _configured_store, _upsert_memory_audit_event
 from beginner_agent.run_lineage import lineage_for_run_id
 
 from .models import AuditQuery, MemoryQuery, PageInfo

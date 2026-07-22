@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from beginner_agent.memory_retrieval import _rerank_memory_candidates
+from beginner_agent.memory.retrieval import _rerank_memory_candidates
 from beginner_agent.state_factory import create_initial_state
 
 

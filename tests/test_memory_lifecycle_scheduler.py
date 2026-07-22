@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from beginner_agent import memory_lifecycle_scheduler as scheduler
-from beginner_agent.memory_lifecycle import LifecycleReport
+from beginner_agent.memory import lifecycle_scheduler as scheduler
+from beginner_agent.memory.lifecycle import LifecycleReport
 
 
 def _report() -> LifecycleReport:

@@ -11,7 +11,7 @@ from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from beginner_agent.memory_settings import (
+from beginner_agent.memory.settings import (
     DEFAULT_PROJECT_ID,
     DEFAULT_TENANT_ID,
     DEFAULT_USER_ID,

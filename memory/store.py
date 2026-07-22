@@ -3,14 +3,14 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .failure_memory import build_failure_memory_profile
-from .memory_audit import _build_audit_event
-from .memory_jsonl_store import JsonlMemoryStore
-from .memory_models import MemoryAuditEvent, MemoryRecord, MemoryStore
-from .memory_policy import _records_share_memory_pattern
-from .memory_postgres_store import PostgresMemoryStore
-from .memory_quality import MemoryEvaluator, adjusted_memory_fields
-from .memory_settings import (
+from .failure import build_failure_memory_profile
+from .audit import _build_audit_event
+from .jsonl_store import JsonlMemoryStore
+from .models import MemoryAuditEvent, MemoryRecord, MemoryStore
+from .policy import _records_share_memory_pattern
+from .postgres_store import PostgresMemoryStore
+from .quality import MemoryEvaluator, adjusted_memory_fields
+from .settings import (
     DEFAULT_MEMORY_BACKEND,
     MAX_MEMORY_RECORDS,
     MEMORY_PROMOTION_SUCCESS_THRESHOLD,
