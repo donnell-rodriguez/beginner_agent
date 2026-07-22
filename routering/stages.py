@@ -68,8 +68,8 @@ def build_stage_reports(
     #
     # 把规则判断也记录下来，是为了后续排查：
     #   “最终判断和规则判断为什么不一样？”
-    rule_intent = rules.classify_task_type(text)
-    rule_risk = rules.classify_risk_level(text)
+    rule_intent = rules.explain_task_type(text)
+    rule_risk = rules.explain_risk_level(text)
 
     # 中文注释：
     # 下面返回 5 个阶段报告。
@@ -97,7 +97,14 @@ def build_stage_reports(
             # - agent：需要进入复杂 agent loop。
             stage="intent",
             decision=decision.task_type,
-            reason=f"最终 intent={decision.task_type}；规则兜底会判为 {rule_intent}。",
+            reason=(
+                f"最终 intent={decision.task_type}；"
+                f"规则兜底会判为 {rule_intent.outcome}；"
+                f"ruleset={rule_intent.ruleset_version}；"
+                f"source={rule_intent.ruleset_source}；"
+                f"selected_rule={rule_intent.selected_rule_id or 'none'}；"
+                f"原因：{rule_intent.selected_rule_reason}"
+            ),
             confidence=decision.confidence,
         ),
         RouterStageReport(
@@ -109,7 +116,14 @@ def build_stage_reports(
             # high 通常意味着更可能需要人工审批。
             stage="risk",
             decision=decision.risk_level,
-            reason=f"最终 risk={decision.risk_level}；规则兜底会判为 {rule_risk}。",
+            reason=(
+                f"最终 risk={decision.risk_level}；"
+                f"规则兜底会判为 {rule_risk.outcome}；"
+                f"ruleset={rule_risk.ruleset_version}；"
+                f"source={rule_risk.ruleset_source}；"
+                f"selected_rule={rule_risk.selected_rule_id or 'none'}；"
+                f"原因：{rule_risk.selected_rule_reason}"
+            ),
             confidence=decision.confidence,
         ),
         RouterStageReport(

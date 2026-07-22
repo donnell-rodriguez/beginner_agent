@@ -12,7 +12,7 @@ from beginner_agent.routering.observability import (
     append_router_eval_case,
     read_router_eval_cases,
 )
-from beginner_agent.routering.rules import load_router_rules
+from beginner_agent.routering.rules import RouterRule, RouterRuleSet, load_router_rules
 from beginner_agent.state_factory import create_initial_state
 
 
@@ -154,6 +154,154 @@ def test_router_rules_can_be_loaded_from_json_config(
 
     assert rules.classify_task_type("帮我审计项目") == "agent"
     assert rules.classify_risk_level("执行危险操作") == "high"
+
+
+def test_router_rules_explain_priority_and_selected_rule() -> None:
+    """RuleSpec 会按优先级选择规则，并保留命中解释。"""
+
+    rules = RouterRuleSet(
+        version="test-v1",
+        source="unit-test",
+        rules=(
+            RouterRule(
+                id="task.write.low_priority",
+                category="task_type",
+                outcome="write",
+                keywords=("报告",),
+                priority=100,
+                reason="低优先级写作规则。",
+            ),
+            RouterRule(
+                id="task.agent.high_priority",
+                category="task_type",
+                outcome="agent",
+                keywords=("报告",),
+                priority=500,
+                reason="高优先级 agent 规则。",
+            ),
+        ),
+    )
+
+    decision = rules.explain_task_type("帮我分析报告里的代码问题")
+
+    assert decision.outcome == "agent"
+    assert decision.ruleset_version == "test-v1"
+    assert decision.ruleset_source == "unit-test"
+    assert decision.selected_rule_id == "task.agent.high_priority"
+    assert len(decision.matches) == 2
+
+
+def test_router_rules_support_modern_config_and_rollout(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """现代 RuleSpec 配置支持 version、priority、enabled、rollout_percent。"""
+
+    rules_path = tmp_path / "router_rules_modern.json"
+    rules_path.write_text(
+        """
+        {
+          "version": "router-rules-test-v2",
+          "rules": [
+            {
+              "id": "task.agent.disabled",
+              "category": "task_type",
+              "outcome": "agent",
+              "keywords": ["禁用规则"],
+              "priority": 900,
+              "enabled": false,
+              "rollout_percent": 100,
+              "reason": "禁用规则不应该命中。"
+            },
+            {
+              "id": "task.agent.canary_off",
+              "category": "task_type",
+              "outcome": "agent",
+              "keywords": ["灰度关闭"],
+              "priority": 800,
+              "enabled": true,
+              "rollout_percent": 0,
+              "reason": "灰度 0% 不应该命中。"
+            },
+            {
+              "id": "task.agent.modern",
+              "category": "task_type",
+              "outcome": "agent",
+              "keywords": ["审计代码"],
+              "priority": 700,
+              "enabled": true,
+              "rollout_percent": 100,
+              "reason": "代码审计进入 agent。"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_RULES_PATH", str(rules_path))
+
+    rules = load_router_rules()
+
+    assert rules.version == "router-rules-test-v2"
+    assert rules.classify_task_type("请审计代码") == "agent"
+    assert rules.explain_task_type("请审计代码").selected_rule_id == "task.agent.modern"
+    assert rules.classify_task_type("禁用规则") == "chat"
+    assert rules.classify_task_type("灰度关闭") == "chat"
+
+
+def test_router_rules_support_rollback_path(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rollback path 存在时优先使用上一版规则。"""
+
+    current_path = tmp_path / "rules.current.json"
+    rollback_path = tmp_path / "rules.previous.json"
+    current_path.write_text(
+        """
+        {
+          "version": "current-bad",
+          "rules": [
+            {
+              "id": "task.write.current",
+              "category": "task_type",
+              "outcome": "write",
+              "keywords": ["回滚测试"],
+              "priority": 100,
+              "reason": "当前规则。"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    rollback_path.write_text(
+        """
+        {
+          "version": "previous-good",
+          "rules": [
+            {
+              "id": "task.agent.previous",
+              "category": "task_type",
+              "outcome": "agent",
+              "keywords": ["回滚测试"],
+              "priority": 100,
+              "reason": "上一版规则。"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_RULES_PATH", str(current_path))
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_RULES_ROLLBACK_PATH", str(rollback_path))
+
+    rules = load_router_rules()
+    decision = rules.explain_task_type("请处理回滚测试")
+
+    assert rules.source.startswith("rollback:")
+    assert decision.outcome == "agent"
+    assert decision.ruleset_version == "previous-good"
 
 
 def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> None:
