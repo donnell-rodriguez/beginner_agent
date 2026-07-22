@@ -8,7 +8,12 @@ from .multistage import (
     build_multistage_reports,
     run_multistage_router,
 )
-from .observability import append_router_eval_case, append_router_event, read_router_eval_cases
+from .observability import (
+    append_router_eval_case,
+    append_router_event,
+    last_router_event_error,
+    read_router_eval_cases,
+)
 from .prompts import RouterPromptSpec, select_router_prompt
 from .eval import (
     classify_router_eval_failure,
@@ -64,6 +69,7 @@ __all__ = [
     "append_router_eval_trend",
     "append_router_feedback",
     "append_router_event",
+    "last_router_event_error",
     "build_stage_reports",
     "build_multistage_reports",
     "classify_router_security",

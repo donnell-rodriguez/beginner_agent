@@ -20,6 +20,7 @@ from beginner_agent.routering.feedback import read_router_feedback, record_route
 from beginner_agent.routering.models import RouterEvalCase
 from beginner_agent.routering.observability import (
     append_router_eval_case,
+    last_router_event_error,
     read_router_eval_cases,
 )
 from beginner_agent.routering.prompts import select_router_prompt
@@ -438,6 +439,48 @@ def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> N
         "prompt_registry",
     }
     assert records
+
+
+def test_router_observability_failure_does_not_break_router(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """观测写入失败不能拖垮 Router 主路径。"""
+
+    import beginner_agent.routering.observability as observability
+
+    class FailingSink:
+        def append_event(self, event):
+            raise OSError("disk is full")
+
+        def read_events(self, limit=None):
+            return []
+
+        def append_eval_case(self, case):
+            return None
+
+        def read_eval_cases(self, limit=None):
+            return []
+
+        def append_feedback_event(self, event):
+            return None
+
+        def read_feedback_events(self, limit=None):
+            return []
+
+    monkeypatch.setattr(observability, "resolve_router_observability_sink", lambda: FailingSink())
+    monkeypatch.setattr(
+        router,
+        "chat_completion",
+        lambda *args, **kwargs: (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"普通问答","confidence":0.9}'
+        ),
+    )
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+
+    assert result["task_type"] == "chat"
+    assert "OSError: disk is full" == last_router_event_error()
 
 
 def test_router_runs_independent_multistage_model_calls(
