@@ -114,6 +114,14 @@ def _router_decision_id(run_id: str, text: str, decision: RouterDecision) -> str
 
     这里把 run_id、用户输入、决策结果和当前时间一起 hash，
     得到一个短 ID。
+
+    返回值示例：
+
+        "a1b2c3d4e5f67890"
+
+    也就是说，最终 return 的不是完整 hash，
+    而是 sha256 结果的前 16 个十六进制字符。
+    这个长度已经足够本地审计和日志排查使用。
     """
 
     raw = json.dumps(
