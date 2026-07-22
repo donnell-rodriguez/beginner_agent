@@ -204,6 +204,7 @@ def _parse_router_decision(response: str) -> RouterDecision:
     """
 
     data = json_loads_from_model(response)
+    # pydantic v2提供的model_validate方法。
     return RouterDecision.model_validate(data)
 
 
@@ -221,6 +222,7 @@ def _apply_security_signal(
 
     if security.malicious_intent == "none":
         return decision
+    # model_copy也是pydantic里面的v2下的一个函数
     return decision.model_copy(
         update={
             "task_type": "agent",
@@ -333,6 +335,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     # 中文注释：
     # RouterEvent 是结构化审计事件。
     # 它既会写进 State.router_report，也会写入本地 JSONL 观测文件。
+    #相当于按一下高精度秒表；调用两次并相减，就能得到一段代码的运行耗时。
     latency_ms = int((time.perf_counter() - started) * 1000)
     event = RouterEvent(
         decision_id=_router_decision_id(str(state.get("run_id", "")), text, decision),
@@ -348,6 +351,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
         model_response=_truncate_model_response(model_response),
         model_error=model_error,
         fallback_reason=fallback_reason,
+        failure_audit=multistage.failure_audit,
     )
     append_router_event(event)
     router_report = event.as_dict()

@@ -280,6 +280,11 @@ class RouterEvent:
     fallback_reason: str = ""
 
     # 中文注释：
+    # failure_audit 保存 Router 子阶段失败/修复/保守策略的结构化记录。
+    # 它避免把关键失败信息只塞进 reason 字符串里。
+    failure_audit: tuple[dict[str, Any], ...] = ()
+
+    # 中文注释：
     # created_at 是事件创建时间。
     # 如果外部没有传入，就在 as_dict() 里自动生成当前 UTC 时间。
     created_at: str = ""
@@ -301,7 +306,9 @@ class RouterEvent:
             "model_response": self.model_response,
             "model_error": self.model_error,
             "fallback_reason": self.fallback_reason,
+            "failure_audit": list(self.failure_audit),
             "created_at": self.created_at
+            # .isoformat() 会把 datetime 对象转换为字符串
             or datetime.now(timezone.utc).isoformat(),
         }
 

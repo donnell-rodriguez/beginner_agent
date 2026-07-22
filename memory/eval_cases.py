@@ -94,6 +94,7 @@ def evaluate_retrieval_case(
     false_positive_ids = [item for item in negative if item in retrieved_ids]
     recall = len(hit_ids) / max(1, len(expected))
     precision_guard = 1.0 - (len(false_positive_ids) / max(1, len(retrieved_ids)))
+    passed = bool(expected and len(hit_ids) == len(expected) and not false_positive_ids)
     return {
         "query": case.get("query", ""),
         "retrieved_ids": retrieved_ids,
@@ -103,5 +104,5 @@ def evaluate_retrieval_case(
         "false_positive_ids": false_positive_ids,
         "recall": round(recall, 4),
         "precision_guard": round(max(0.0, precision_guard), 4),
+        "passed": passed,
     }
-

@@ -215,8 +215,84 @@ def test_router_rejects_extra_model_fields_and_uses_fallback(
     result = router.router_classifier_node(create_initial_state("帮我读取 graph.py 源码"))
 
     assert result["task_type"] == "agent"
-    assert result["risk_level"] == "low"
+    assert result["risk_level"] == "medium"
     assert "兜底规则" in result["route_reason"]
+    assert result["router_report"]["failure_audit"]
+
+
+def test_router_repairs_invalid_stage_json_before_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """子 Router 输出格式错误时，先做一次 JSON repair，再决定是否 fallback。"""
+
+    calls: list[str] = []
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        calls.append(system_prompt)
+        if "Intent Router JSON Repair" in system_prompt:
+            return '{"task_type":"chat","reason":"修复后的 intent JSON。","confidence":0.91}'
+        if "Intent Router" in system_prompt:
+            return "task_type=chat, reason=not json"
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"low","reason":"普通问答。","confidence":0.92}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":false,"reason":"不需要工具。","confidence":0.93}'
+        raise AssertionError(f"未识别的 Router 阶段：{system_prompt}")
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+    intent_stage = [
+        item
+        for item in result["router_report"]["stage_reports"]
+        if item["stage"] == "intent_router"
+    ][0]
+    audit = [
+        item
+        for item in result["router_report"]["failure_audit"]
+        if item["stage"] == "intent_router"
+    ][0]
+
+    assert result["router_report"]["source"] == "llm"
+    assert result["task_type"] == "chat"
+    assert "repair_attempts=1" in intent_stage["reason"]
+    assert audit["repair_attempt_count"] == 1
+    assert audit["repair_success"] is True
+    assert audit["raw_invalid_response"] == "task_type=chat, reason=not json"
+    assert len(calls) == 4
+
+
+def test_router_risk_failure_uses_conservative_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Risk Router 失败时，读取/工具类任务不能轻易降成 low。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_REPAIR_RETRY_ENABLED", "false")
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        if "Intent Router" in system_prompt:
+            return '{"task_type":"agent","reason":"需要查看项目文件。","confidence":0.91}'
+        if "Risk Router" in system_prompt:
+            return "risk=unknown"
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":true,"reason":"需要访问文件系统。","confidence":0.93}'
+        raise AssertionError(f"未识别的 Router 阶段：{system_prompt}")
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("请列出项目目录里的文件"))
+    risk_audit = [
+        item
+        for item in result["router_report"]["failure_audit"]
+        if item["stage"] == "risk_router"
+    ][0]
+
+    assert result["task_type"] == "agent"
+    assert result["risk_level"] == "medium"
+    assert result["needs_tool"] is True
+    assert risk_audit["failure_policy_applied"] == "risk_conservative_fallback"
 
 
 def test_route_by_task_guards_invalid_state() -> None:
