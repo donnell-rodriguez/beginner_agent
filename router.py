@@ -12,9 +12,10 @@ from .llm_client import chat_completion
 from .node_utils import json_loads_from_model
 from .config import load_project_env
 from .routering.context import apply_context_policy, load_router_context
-from .routering.models import RouterDecision, RouterEvent
+from .routering.models import RouterDecision, RouterEvent, RouterStageReport
 from .routering.models import RouterSecuritySignal
 from .routering.observability import append_router_event
+from .routering.prompts import select_router_prompt
 from .routering.rules import RouterRuleSet, load_router_rules
 from .routering.security import classify_router_security
 from .routering.stages import build_stage_reports
@@ -282,6 +283,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     rules = load_router_rules()
     security = classify_router_security(text)
     context = load_router_context()
+    prompt = select_router_prompt(text)
     min_confidence = _router_min_confidence()
 
     try:
@@ -296,23 +298,12 @@ def router_classifier_node(state: State) -> dict[str, Any]:
             [
                 {
                     "role": "system",
-                    "content": (
-                        "你是 agent 的 Router / Classifier。"
-                        "请判断任务类型、风险等级、是否需要工具。"
-                        "task_type 只能是 search、write、chat、agent。"
-                        "risk_level 只能是 low、medium、high。"
-                        "如果用户需要读取文件、理解项目、查看源码，task_type=agent，needs_tool=true。"
-                        "如果用户要求修复代码、修改代码、运行测试、查看 diff，也应该 task_type=agent。"
-                        "如果用户要求修改、删除、执行命令，risk_level=high。"
-                        "只返回严格 JSON，不要解释。"
-                        '格式：{"task_type":"agent","risk_level":"low",'
-                        '"needs_tool":true,"reason":"一句话原因","confidence":0.8}'
-                    ),
+                    "content": prompt.template,
                 },
                 {"role": "user", "content": text},
             ],
-            temperature=0,
-            max_tokens=240,
+            temperature=prompt.temperature,
+            max_tokens=prompt.max_tokens,
         )
 
         # 中文注释：
@@ -378,6 +369,19 @@ def router_classifier_node(state: State) -> dict[str, Any]:
         rules=rules,
         security=security,
         context_policy_reason=context_policy_reason,
+    )
+    stage_reports.append(
+        RouterStageReport(
+            stage="prompt_registry",
+            decision=prompt.version,
+            reason=(
+                f"prompt_version={prompt.version}；"
+                f"experiment_group={prompt.experiment_group}；"
+                f"source={prompt.source}；"
+                f"rollback_from={prompt.rollback_from or 'none'}。"
+            ),
+            confidence=1.0,
+        )
     )
 
     # 中文注释：

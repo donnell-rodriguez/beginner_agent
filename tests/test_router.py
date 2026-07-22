@@ -21,6 +21,7 @@ from beginner_agent.routering.observability import (
     append_router_eval_case,
     read_router_eval_cases,
 )
+from beginner_agent.routering.prompts import select_router_prompt
 from beginner_agent.routering.rules import RouterRule, RouterRuleSet, load_router_rules
 from beginner_agent.routering.security import classify_router_security
 from beginner_agent.state_factory import create_initial_state
@@ -432,8 +433,117 @@ def test_router_writes_observability_event(monkeypatch: pytest.MonkeyPatch) -> N
         "tool_needs",
         "security",
         "context_policy",
+        "prompt_registry",
     }
     assert records
+
+
+def test_router_uses_configured_prompt_registry(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Router prompt 可以从配置文件加载，并写入 prompt_registry stage。"""
+
+    prompt_path = tmp_path / "router_prompt.json"
+    prompt_path.write_text(
+        """
+        {
+          "version": "router-prompt-test-v2",
+          "experiment_group": "control",
+          "template": "TEST ROUTER PROMPT: return strict json only.",
+          "temperature": 0,
+          "max_tokens": 111
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PROMPT_PATH", str(prompt_path))
+
+    captured: dict[str, object] = {}
+
+    def fake_chat_completion(messages, **kwargs):
+        captured["system_prompt"] = messages[0]["content"]
+        captured["max_tokens"] = kwargs["max_tokens"]
+        return (
+            '{"task_type":"chat","risk_level":"low",'
+            '"needs_tool":false,"reason":"普通问答","confidence":0.9}'
+        )
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+
+    assert captured["system_prompt"] == "TEST ROUTER PROMPT: return strict json only."
+    assert captured["max_tokens"] == 111
+    prompt_stage = [
+        item
+        for item in result["router_report"]["stage_reports"]
+        if item["stage"] == "prompt_registry"
+    ][0]
+    assert prompt_stage["decision"] == "router-prompt-test-v2"
+
+
+def test_router_prompt_registry_supports_variant_rollout(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prompt registry 支持 variants 和 rollout_percent。"""
+
+    prompt_path = tmp_path / "router_prompt_variants.json"
+    prompt_path.write_text(
+        """
+        {
+          "version": "router-prompt-control",
+          "experiment_group": "control",
+          "template": "CONTROL PROMPT",
+          "variants": [
+            {
+              "version": "router-prompt-candidate",
+              "experiment_group": "candidate",
+              "rollout_percent": 100,
+              "template": "CANDIDATE PROMPT",
+              "max_tokens": 99
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PROMPT_PATH", str(prompt_path))
+
+    prompt = select_router_prompt("任意输入")
+
+    assert prompt.version == "router-prompt-candidate"
+    assert prompt.experiment_group == "candidate"
+    assert prompt.template == "CANDIDATE PROMPT"
+    assert prompt.max_tokens == 99
+
+
+def test_router_prompt_registry_supports_rollback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rollback path 存在时优先使用上一版 prompt。"""
+
+    current_path = tmp_path / "router_prompt.current.json"
+    rollback_path = tmp_path / "router_prompt.previous.json"
+    current_path.write_text(
+        '{"version":"prompt-current","template":"CURRENT PROMPT"}',
+        encoding="utf-8",
+    )
+    rollback_path.write_text(
+        '{"version":"prompt-previous","template":"PREVIOUS PROMPT"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PROMPT_PATH", str(current_path))
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PROMPT_ROLLBACK_PATH", str(rollback_path))
+
+    prompt = select_router_prompt("任意输入")
+
+    assert prompt.version == "prompt-previous"
+    assert prompt.template == "PREVIOUS PROMPT"
+    assert prompt.source.startswith("rollback:")
+    assert prompt.rollback_from == str(current_path)
 
 
 def test_router_observability_null_sink_does_not_write_file(
@@ -499,7 +609,12 @@ def test_router_context_policy_can_raise_risk(monkeypatch: pytest.MonkeyPatch) -
     assert result["risk_level"] == "high"
     assert result["needs_tool"] is True
     assert result["router_report"]["context"]["project_id"] == "sensitive-project"
-    assert result["router_report"]["stage_reports"][-1]["decision"] == "high_risk_override"
+    context_stage = [
+        item
+        for item in result["router_report"]["stage_reports"]
+        if item["stage"] == "context_policy"
+    ][0]
+    assert context_stage["decision"] == "high_risk_override"
 
 
 def test_router_eval_case_roundtrip() -> None:

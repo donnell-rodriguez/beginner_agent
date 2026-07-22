@@ -3,6 +3,7 @@ from __future__ import annotations
 from .context import apply_context_policy, load_router_context
 from .models import RouterDecision, RouterEvalCase, RouterEvent, RouterSecuritySignal
 from .observability import append_router_eval_case, append_router_event, read_router_eval_cases
+from .prompts import RouterPromptSpec, select_router_prompt
 from .eval import (
     classify_router_eval_failure,
     evaluate_router_prediction,
@@ -36,6 +37,7 @@ __all__ = [
     "RouterEvent",
     "RouterFeedbackRecord",
     "RouterObservabilitySink",
+    "RouterPromptSpec",
     "RouterRule",
     "RouterRuleSet",
     "RouterSecuritySignal",
@@ -56,6 +58,7 @@ __all__ = [
     "read_router_eval_cases",
     "read_router_eval_trends",
     "run_router_eval",
+    "select_router_prompt",
     "JsonlRouterObservabilitySink",
     "KafkaSpoolRouterObservabilitySink",
     "NullRouterObservabilitySink",
