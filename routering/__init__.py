@@ -43,7 +43,6 @@ from .sinks import (
     RouterObservabilitySink,
     resolve_router_observability_sink,
 )
-from .stages import build_stage_reports
 
 __all__ = [
     "RouterDecision",
@@ -70,7 +69,6 @@ __all__ = [
     "append_router_feedback",
     "append_router_event",
     "last_router_event_error",
-    "build_stage_reports",
     "build_multistage_reports",
     "classify_router_security",
     "classify_router_eval_failure",
