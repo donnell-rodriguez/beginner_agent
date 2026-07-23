@@ -23,8 +23,13 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
     三件事不会互相耦合在一起。
     """
 
+    run_id = f"run-{uuid.uuid4()}"
     return {
-        "run_id": f"run-{uuid.uuid4()}",
+        "run_id": run_id,
+        # 中文注释：
+        # 本地 CLI 默认用 run_id 作为 thread_id。
+        # 生产环境可以在恢复运行时传入稳定 thread_id。
+        "thread_id": run_id,
         "user_input": user_input,
         "task_type": "chat",
         "risk_level": "low",

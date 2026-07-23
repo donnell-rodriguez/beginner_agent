@@ -353,6 +353,17 @@ class State(TypedDict):
     run_id: str
 
     # 中文注释：
+    # thread_id 是 LangGraph checkpoint 恢复时常用的线程标识。
+    #
+    # 真实 LangGraph checkpoint 通常通过 invoke/stream 的 config 传入：
+    #
+    #     {"configurable": {"thread_id": "..."}}
+    #
+    # 这里把 thread_id 也放进 State，是为了让 checkpoint_report
+    # 可以在 Summary / Observability 里说明当前运行是否具备恢复条件。
+    thread_id: str
+
+    # 中文注释：
     # 用户最开始输入的问题或任务。
     user_input: str
 
