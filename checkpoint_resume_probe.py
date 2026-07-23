@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ConfigDict, Field
 
+from .checkpoint_runtime import langgraph_runtime_config
 from .checkpointing import build_checkpointer, checkpoint_backend_name
 
 
@@ -69,7 +70,7 @@ def run_checkpoint_resume_probe(thread_id: str | None = None) -> CheckpointResum
     """
 
     resolved_thread_id = thread_id or f"checkpoint-resume-probe-{uuid.uuid4()}"
-    config = {"configurable": {"thread_id": resolved_thread_id}}
+    config = langgraph_runtime_config(resolved_thread_id)
 
     graph_before = _build_resume_probe_graph()
     first_chunks = list(
@@ -154,4 +155,3 @@ def _extract_interrupt_payload(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         value = getattr(interrupt_obj, "value", interrupt_obj)
         return value if isinstance(value, dict) else {"value": value}
     return {}
-

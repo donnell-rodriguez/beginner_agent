@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from .tools import READ_ONLY_TOOLS, WRITE_TOOLS
+from .checkpoint_runtime import make_thread_id
 
 
-def create_initial_state(user_input: str) -> dict[str, Any]:
+def create_initial_state(user_input: str, *, thread_id: str | None = None) -> dict[str, Any]:
     """创建 beginner_agent 每次运行的初始 State。
 
     中文注释：
@@ -23,13 +23,23 @@ def create_initial_state(user_input: str) -> dict[str, Any]:
     三件事不会互相耦合在一起。
     """
 
-    run_id = f"run-{uuid.uuid4()}"
+    run_id = make_thread_id("run")
+    resolved_thread_id = thread_id or run_id
     return {
         "run_id": run_id,
         # 中文注释：
-        # 本地 CLI 默认用 run_id 作为 thread_id。
-        # 生产环境可以在恢复运行时传入稳定 thread_id。
-        "thread_id": run_id,
+        # State.thread_id 必须和 LangGraph runtime config 里的 thread_id 保持一致。
+        #
+        # 也就是说，如果调用图时传：
+        #
+        #     config={"configurable": {"thread_id": "abc"}}
+        #
+        # 这里也应该写：
+        #
+        #     create_initial_state(..., thread_id="abc")
+        #
+        # 这样 checkpoint_report、approval_store、observability 看到的是同一条任务线。
+        "thread_id": resolved_thread_id,
         "user_input": user_input,
         "task_type": "chat",
         "risk_level": "low",

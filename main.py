@@ -50,6 +50,7 @@ if __package__ is None or __package__ == "":
 #   add_conditional_edges(...)
 #   compile()
 from beginner_agent.graph import build_graph
+from beginner_agent.checkpoint_runtime import langgraph_runtime_config
 from beginner_agent.serialization import serialize_for_json
 from beginner_agent.state_factory import create_initial_state
 
@@ -78,7 +79,11 @@ def run_case(user_input: str) -> None:
     # LangGraph 会从 START 开始，
     # 按 graph.py 里定义的节点和边执行，
     # 最后返回完整 State。
-    initial_state = create_initial_state(user_input)
+    # 中文注释：
+    # demo 入口使用固定 thread_id，方便你多次运行时观察 checkpoint 行为。
+    # 关键点是：State.thread_id 和 LangGraph runtime config 必须是同一个值。
+    thread_id = "beginner-agent-demo"
+    initial_state = create_initial_state(user_input, thread_id=thread_id)
 
     # 中文注释：
     # graph.py 里 compile(checkpointer=...) 开启了 checkpoint。
@@ -89,7 +94,7 @@ def run_case(user_input: str) -> None:
     #   如果任务触发 Approval Interrupt，请使用 cli.py。
     result = graph.invoke(
         initial_state,
-        config={"configurable": {"thread_id": "beginner-agent-demo"}},
+        config=langgraph_runtime_config(thread_id),
     )
 
     # 中文注释：

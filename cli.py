@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +17,10 @@ from beginner_agent.approval_store import (  # noqa: E402
     ApprovalStore,
     default_approver_id,
     default_timeout_seconds,
+)
+from beginner_agent.checkpoint_runtime import (  # noqa: E402
+    langgraph_runtime_config,
+    resolve_thread_id,
 )
 from beginner_agent.graph import build_graph  # noqa: E402
 from beginner_agent.serialization import serialize_for_json  # noqa: E402
@@ -185,9 +188,9 @@ def run_cli(
     """运行支持 Approval Interrupt 的 CLI。"""
 
     graph = build_graph()
-    resolved_thread_id = thread_id or f"beginner-agent-cli-{uuid.uuid4()}"
-    config = {"configurable": {"thread_id": resolved_thread_id}}
-    graph_input: Any = create_initial_state(user_input)
+    resolved_thread_id = resolve_thread_id(thread_id, fallback_prefix="beginner-agent-cli")
+    config = langgraph_runtime_config(resolved_thread_id)
+    graph_input: Any = create_initial_state(user_input, thread_id=resolved_thread_id)
     store = ApprovalStore()
     resolved_approver = approver_id or default_approver_id()
     resolved_timeout = timeout_seconds or default_timeout_seconds()
