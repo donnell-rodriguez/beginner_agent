@@ -125,6 +125,13 @@ def load_router_governance_contract(
                 default_max_tokens=80,
             ),
             _stage_budget(
+                "security_classifier",
+                model_env="BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MODEL",
+                max_tokens_env="BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MAX_TOKENS",
+                timeout_env="BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_TIMEOUT_MS",
+                default_max_tokens=120,
+            ),
+            _stage_budget(
                 "repair_router",
                 model_env="BEGINNER_AGENT_ROUTER_REPAIR_MODEL",
                 max_tokens_env="BEGINNER_AGENT_ROUTER_REPAIR_MAX_TOKENS",
@@ -145,6 +152,7 @@ def router_stage_model(stage_title: str) -> str:
         "intent_router": "BEGINNER_AGENT_ROUTER_INTENT_MODEL",
         "risk_router": "BEGINNER_AGENT_ROUTER_RISK_MODEL",
         "tool_needs_router": "BEGINNER_AGENT_ROUTER_TOOL_NEEDS_MODEL",
+        "security_classifier": "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MODEL",
         "intent_router_json_repair": "BEGINNER_AGENT_ROUTER_REPAIR_MODEL",
         "risk_router_json_repair": "BEGINNER_AGENT_ROUTER_REPAIR_MODEL",
         "tool_needs_router_json_repair": "BEGINNER_AGENT_ROUTER_REPAIR_MODEL",

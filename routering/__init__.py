@@ -53,6 +53,11 @@ from .feedback import (
 )
 from .rules import RouterRule, RouterRuleSet, RuleDecision, RuleMatch, load_router_rules
 from .security import classify_router_security
+from .security_classifier import (
+    merge_security_signals,
+    run_llm_security_classifier,
+    security_classifier_enabled,
+)
 from .sinks import (
     JsonlRouterObservabilitySink,
     KafkaSpoolRouterObservabilitySink,
@@ -100,6 +105,7 @@ __all__ = [
     "last_router_event_error",
     "build_multistage_reports",
     "classify_router_security",
+    "merge_security_signals",
     "classify_router_eval_failure",
     "evaluate_router_prediction",
     "evaluate_router_regression_gate",
@@ -119,8 +125,10 @@ __all__ = [
     "record_router_correction",
     "write_router_eval_baseline",
     "run_router_eval",
+    "run_llm_security_classifier",
     "run_multistage_router",
     "select_router_prompt",
+    "security_classifier_enabled",
     "sanitize_router_input_for_prompt",
     "JsonlRouterObservabilitySink",
     "KafkaSpoolRouterObservabilitySink",

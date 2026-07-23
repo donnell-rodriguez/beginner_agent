@@ -13,7 +13,13 @@ from ..models import DecisionSource, RouterDecision
 # 这里放“多阶段 Router pipeline”内部的数据结构。
 # 它们服务 intent/risk/tool/security 子阶段，不直接负责 graph 路由。
 
-StageName = Literal["intent_router", "risk_router", "tool_needs_router", "security_router"]
+StageName = Literal[
+    "intent_router",
+    "risk_router",
+    "tool_needs_router",
+    "security_classifier",
+    "security_router",
+]
 
 # 中文注释：
 # StageModelT 是一个“泛型类型变量”。
@@ -125,6 +131,29 @@ class ToolNeedsStageModel(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
 
+class SecurityClassifierStageModel(BaseModel):
+    """LLM Security Classifier 的模型输出 schema。
+
+    中文注释：
+    这个阶段只允许“补充/提高风险”，不能降低本地安全策略判断。
+    合并逻辑在 security_classifier.py 里。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    injection_risk: Literal["none", "suspected", "high"] = "none"
+    malicious_intent: Literal[
+        "none",
+        "prompt_injection",
+        "unsafe_code_action",
+        "data_exfiltration",
+    ] = "none"
+    labels: list[str] = Field(default_factory=list)
+    reason: str = Field(default="Security Classifier 未提供原因。", min_length=1)
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    deny_reason: str = ""
+
+
 @dataclass(frozen=True)
 class RepairInfo:
     """Router 子阶段 JSON repair 的结果。"""
@@ -185,6 +214,7 @@ class MultiStageRouterResult:
     decision: RouterDecision
     stage_decisions: tuple[RouterStageDecision, ...]
     source: DecisionSource
+    security: Any | None = None
     model_response: str = ""
     model_error: str = ""
     fallback_reason: str = ""

@@ -131,6 +131,23 @@ class RouterSecuritySignal:
     # reason 解释为什么命中了这些安全标签。
     reason: str
 
+    # 中文注释：
+    # confidence 表示安全分类本身的置信度。
+    # 它不是最终 RouterDecision 的 confidence，但会进入审计报告。
+    confidence: float = 0.7
+
+    # 中文注释：
+    # deny_reason 是安全分类层给后续 Policy / Approval 看的拒绝原因建议。
+    # Router 本身不直接拒绝执行，但会把这个原因传下去。
+    deny_reason: str = ""
+
+    # 中文注释：
+    # source 表示安全信号来自哪里：
+    # - local_security_policy：本地规则/正则/历史模式。
+    # - llm_security_classifier：LLM 安全分类器提升了风险。
+    # - local_security_policy+llm_security_classifier：两者都有贡献。
+    source: str = "local_security_policy"
+
     def as_dict(self) -> dict[str, Any]:
         """把 dataclass 转成普通 dict，方便写入 State / JSONL。"""
 
@@ -139,6 +156,9 @@ class RouterSecuritySignal:
             "malicious_intent": self.malicious_intent,
             "labels": self.labels,
             "reason": self.reason,
+            "confidence": self.confidence,
+            "deny_reason": self.deny_reason,
+            "source": self.source,
         }
 
 

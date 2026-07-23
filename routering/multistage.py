@@ -11,6 +11,7 @@ from .failure_policy import RouterFailurePolicy, load_router_failure_policy
 from .models import DecisionSource, RouterDecision, RouterSecuritySignal, RouterStageReport
 from .prompts import RouterPromptSpec
 from .rules import RouterRuleSet
+from .security_classifier import run_llm_security_classifier
 from .pipeline.fallback import fallback_intent, fallback_risk, fallback_tool_needs
 from .pipeline.models import (
     IntentStageModel,
@@ -78,9 +79,22 @@ def run_multistage_router(
         min_confidence=min_confidence,
         failure_policy=failure_policy,
     )
-    security_decision = _security_stage_decision(security, failure_policy=failure_policy)
+    merged_security, security_classifier_decision = run_llm_security_classifier(
+        text,
+        local_security=security,
+        prompt=prompt,
+        chat_completion=chat_completion,
+    )
+    security_decision = _security_stage_decision(
+        merged_security,
+        failure_policy=failure_policy,
+    )
 
-    stage_decisions = (intent, risk, tool_needs, security_decision)
+    stage_decisions = tuple(
+        stage
+        for stage in (intent, risk, tool_needs, security_classifier_decision, security_decision)
+        if stage is not None
+    )
     source: DecisionSource = "llm"
     if any(stage.source == "fallback" for stage in stage_decisions):
         source = "fallback"
@@ -89,16 +103,16 @@ def run_multistage_router(
         intent=intent,
         risk=risk,
         tool_needs=tool_needs,
-        security=security,
+        security=merged_security,
     )
 
-    if security.malicious_intent != "none":
+    if merged_security.malicious_intent != "none":
         decision = decision.model_copy(
             update={
                 "task_type": "agent",
                 "risk_level": "high",
                 "needs_tool": True,
-                "reason": f"{decision.reason}；Security Router 保守升级：{security.reason}",
+                "reason": f"{decision.reason}；Security Router 保守升级：{merged_security.reason}",
                 "confidence": min(decision.confidence, 0.65),
             }
         )
@@ -109,7 +123,7 @@ def run_multistage_router(
                 "task_type": "agent",
                 "risk_level": "medium",
                 "needs_tool": True,
-                "reason": f"{decision.reason}；Security Router 疑似风险保守升级：{security.reason}",
+                "reason": f"{decision.reason}；Security Router 疑似风险保守升级：{merged_security.reason}",
                 "confidence": min(decision.confidence, 0.6),
             }
         )
@@ -119,6 +133,7 @@ def run_multistage_router(
         decision=decision,
         stage_decisions=stage_decisions,
         source=source,
+        security=merged_security,
         model_response=combine_model_responses(stage_decisions),
         model_error=combine_stage_field(stage_decisions, "model_error"),
         fallback_reason=combine_stage_field(stage_decisions, "fallback_reason"),

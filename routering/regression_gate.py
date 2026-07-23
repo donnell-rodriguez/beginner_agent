@@ -212,6 +212,10 @@ def current_router_config_fingerprint() -> RouterConfigFingerprint:
         "BEGINNER_AGENT_ROUTER_FAILURE_LOW_CONFIDENCE_POLICY",
         "BEGINNER_AGENT_ROUTER_FAILURE_RISK_POLICY",
         "BEGINNER_AGENT_ROUTER_FAILURE_SECURITY_POLICY",
+        "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_ENABLED",
+        "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MODEL",
+        "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MAX_TOKENS",
+        "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_TIMEOUT_MS",
     )
     files = tuple(_file_fingerprint(name) for name in file_env_names)
     env = {name: os.getenv(name, "") for name in value_env_names}

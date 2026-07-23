@@ -312,6 +312,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     model_response = multistage.model_response
     model_error = multistage.model_error
     fallback_reason = multistage.fallback_reason
+    security = multistage.security or security
 
     # 中文注释：
     # 第二层：上下文策略覆盖。
