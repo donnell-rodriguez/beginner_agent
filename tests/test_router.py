@@ -26,7 +26,11 @@ from beginner_agent.routering.observability import (
     read_router_eval_cases,
 )
 from beginner_agent.routering.prompts import select_router_prompt
+from beginner_agent.routering.regression_gate import RouterEvalBaseline
 from beginner_agent.routering.regression_gate import evaluate_router_regression_gate
+from beginner_agent.routering.regression_gate import evaluate_router_release_gate
+from beginner_agent.routering.regression_gate import load_router_eval_baseline
+from beginner_agent.routering.regression_gate import write_router_eval_baseline
 from beginner_agent.routering.review import read_router_review_queue
 from beginner_agent.routering.rules import RouterRule, RouterRuleSet, load_router_rules
 from beginner_agent.routering.sanitization import sanitize_router_input_for_prompt
@@ -1205,6 +1209,88 @@ def test_router_regression_gate_marks_bad_eval_run_failed() -> None:
 
     assert gate.passed is False
     assert any("pass_rate" in reason for reason in gate.reasons)
+
+
+def test_router_release_gate_blocks_baseline_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上线门禁不仅看绝对阈值，还要阻止相对 baseline 明显退化。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_GATE_MIN_PASS_RATE", "0.80")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_GATE_MIN_TASK_TYPE_ACCURACY", "0.80")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_GATE_MIN_RISK_LEVEL_ACCURACY", "0.80")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_GATE_MIN_NEEDS_TOOL_ACCURACY", "0.80")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_GATE_MAX_PASS_RATE_DROP", "0.02")
+
+    baseline_run = RouterEvalRun(
+        run_id="baseline",
+        dataset_version="dataset-v1",
+        router_version="router-baseline",
+        total=100,
+        passed=98,
+        failed=2,
+        pass_rate=0.98,
+        task_type_accuracy=0.98,
+        risk_level_accuracy=0.98,
+        needs_tool_accuracy=0.98,
+    )
+    current_run = RouterEvalRun(
+        run_id="current",
+        dataset_version="dataset-v1",
+        router_version="router-current",
+        total=100,
+        passed=94,
+        failed=6,
+        pass_rate=0.94,
+        task_type_accuracy=0.98,
+        risk_level_accuracy=0.98,
+        needs_tool_accuracy=0.98,
+    )
+
+    gate = evaluate_router_release_gate(
+        current_run,
+        baseline=RouterEvalBaseline(run=baseline_run),
+    )
+
+    assert gate.passed is False
+    assert any("pass_rate drop" in reason for reason in gate.reasons)
+    assert gate.regression_gate.passed is True
+
+
+def test_router_eval_baseline_roundtrip_with_config_fingerprint(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """baseline 文件保存 run 和配置指纹，供后续 release gate 对比。"""
+
+    prompt_path = tmp_path / "router_prompt.json"
+    prompt_path.write_text('{"version":"prompt-test","template":"TEST"}', encoding="utf-8")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PROMPT_PATH", str(prompt_path))
+    baseline_path = tmp_path / "router_eval_baseline.json"
+    run = RouterEvalRun(
+        run_id="baseline-roundtrip",
+        dataset_version="dataset-v1",
+        router_version="router-v1",
+        total=1,
+        passed=1,
+        failed=0,
+        pass_rate=1.0,
+        task_type_accuracy=1.0,
+        risk_level_accuracy=1.0,
+        needs_tool_accuracy=1.0,
+    )
+
+    written_path = write_router_eval_baseline(run, path=baseline_path)
+    loaded = load_router_eval_baseline(written_path)
+
+    assert loaded is not None
+    assert loaded.run.run_id == "baseline-roundtrip"
+    assert loaded.config_fingerprint is not None
+    assert loaded.config_fingerprint.fingerprint
+    assert any(
+        item["env"] == "BEGINNER_AGENT_ROUTER_PROMPT_PATH"
+        for item in loaded.config_fingerprint.files
+    )
 
 
 def test_router_sanitization_helper_reports_labels() -> None:

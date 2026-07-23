@@ -91,6 +91,42 @@ class RouterEvalRun:
         }
 
 
+def router_eval_run_from_dict(data: dict[str, Any]) -> RouterEvalRun:
+    """从 JSON/dict 恢复 RouterEvalRun。
+
+    中文注释：
+    regression gate 需要读取历史 baseline run。
+    baseline 通常保存在 JSON 文件里，所以这里提供一个小的反序列化 helper。
+    """
+
+    failures = tuple(
+        RouterEvalFailure(
+            user_input=str(item.get("user_input", "")),
+            mismatches=tuple(str(value) for value in item.get("mismatches", [])),
+            failure_category=str(item.get("failure_category", "unknown_mismatch")),
+            expected=dict(item.get("expected", {})),
+            actual=dict(item.get("actual", {})),
+            reason=str(item.get("reason", "")),
+        )
+        for item in data.get("failures", [])
+        if isinstance(item, dict)
+    )
+    return RouterEvalRun(
+        run_id=str(data.get("run_id", "")),
+        dataset_version=str(data.get("dataset_version", "")),
+        router_version=str(data.get("router_version", "")),
+        total=int(data.get("total", 0)),
+        passed=int(data.get("passed", 0)),
+        failed=int(data.get("failed", 0)),
+        pass_rate=float(data.get("pass_rate", 0.0)),
+        task_type_accuracy=float(data.get("task_type_accuracy", 0.0)),
+        risk_level_accuracy=float(data.get("risk_level_accuracy", 0.0)),
+        needs_tool_accuracy=float(data.get("needs_tool_accuracy", 0.0)),
+        failures=failures,
+        created_at=str(data.get("created_at", "")),
+    )
+
+
 @dataclass(frozen=True)
 class RouterFeedbackRecord:
     """线上反馈记录。

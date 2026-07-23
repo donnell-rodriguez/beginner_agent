@@ -19,7 +19,17 @@ from .observability import (
     read_router_eval_cases,
 )
 from .prompts import RouterPromptSpec, select_router_prompt
-from .regression_gate import RouterRegressionGateResult, evaluate_router_regression_gate
+from .regression_gate import (
+    RouterConfigFingerprint,
+    RouterEvalBaseline,
+    RouterRegressionGateResult,
+    RouterReleaseGateResult,
+    current_router_config_fingerprint,
+    evaluate_router_regression_gate,
+    evaluate_router_release_gate,
+    load_router_eval_baseline,
+    write_router_eval_baseline,
+)
 from .review import RouterReviewItem, read_router_review_queue
 from .sanitization import RouterSanitizedInput, sanitize_router_input_for_prompt
 from .eval import (
@@ -61,12 +71,15 @@ __all__ = [
     "RouterFeedbackRecord",
     "RouterFeedbackEvent",
     "RouterFeedbackResult",
+    "RouterConfigFingerprint",
+    "RouterEvalBaseline",
     "RouterObservabilitySink",
     "RouterPromptSpec",
     "RouterConflict",
     "RouterGovernanceContract",
     "RouterMetricsSnapshot",
     "RouterRegressionGateResult",
+    "RouterReleaseGateResult",
     "RouterReviewItem",
     "RouterRule",
     "RouterRuleSet",
@@ -90,9 +103,12 @@ __all__ = [
     "classify_router_eval_failure",
     "evaluate_router_prediction",
     "evaluate_router_regression_gate",
+    "evaluate_router_release_gate",
     "detect_router_conflicts",
+    "current_router_config_fingerprint",
     "load_router_governance_contract",
     "load_router_eval_dataset",
+    "load_router_eval_baseline",
     "load_router_context",
     "load_router_rules",
     "read_router_eval_cases",
@@ -101,6 +117,7 @@ __all__ = [
     "read_router_metrics",
     "read_router_review_queue",
     "record_router_correction",
+    "write_router_eval_baseline",
     "run_router_eval",
     "run_multistage_router",
     "select_router_prompt",
