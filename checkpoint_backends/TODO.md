@@ -7,12 +7,13 @@
 后续生产级升级路线：
 
 1. End-to-end recovery test
-   - 用固定 thread_id 启动 graph。
-   - 在 Approval Interrupt 或 Async Job Waiter 暂停。
-   - 进程退出。
-   - 重新 build_graph。
-   - 用同一个 thread_id 恢复。
-   - 确认 task_tree / agenda / messages 没丢。
+   - 已实现基础设施级闭环：
+     `checkpoint_resume_probe.py` + `scripts/check_postgres_resume.py`
+     会用固定 thread_id 启动最小 LangGraph，触发 interrupt，
+     重新 build graph 后用 `Command(resume=...)` 恢复并确认继续执行。
+   - 后续还需要业务级闭环：
+     在完整 beginner_agent 主图里用 Approval Interrupt 暂停，
+     恢复后确认 task_tree / agenda / messages / artifact / observability 没丢。
 
 2. Checkpoint backend matrix
    - memory：本地教学。

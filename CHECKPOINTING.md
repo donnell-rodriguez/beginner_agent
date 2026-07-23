@@ -37,6 +37,7 @@ Checkpoint = 运行快照
 checkpointing.py
 graph.py
 scripts/check_postgres_checkpoint.py
+scripts/check_postgres_resume.py
 ```
 
 `graph.py` 里不再直接写：
@@ -93,6 +94,42 @@ BEGINNER_AGENT_CHECKPOINT_DATABASE_URL=postgresql://...
 
 如果两个都没有设置，`checkpointing.py` 会直接报错。
 这比源码里内置默认数据库地址更符合生产级配置管理方式。
+
+## 3.1 恢复闭环验证
+
+中文注释：
+checkpoint 的最终价值不是“能创建 PostgresSaver”，
+而是中断后能用同一个 `thread_id` 恢复。
+
+项目里提供了独立 probe：
+
+```text
+checkpoint_resume_probe.py
+scripts/check_postgres_resume.py
+```
+
+它会执行：
+
+```text
+第一次运行
+  -> 最小 LangGraph 写入 marker
+  -> interrupt(...)
+  -> Postgres checkpoint 保存中间状态
+
+第二次运行
+  -> 重新 build graph
+  -> 同一个 thread_id
+  -> Command(resume={"approved": true})
+  -> 继续执行 finish 节点
+```
+
+本地验证：
+
+```bash
+DATABASE_URL=postgresql://beginner_agent:beginner_agent@127.0.0.1:55432/beginner_agent \
+BEGINNER_AGENT_CHECKPOINT_BACKEND=postgres \
+PYTHONPATH=.. uv run python scripts/check_postgres_resume.py
+```
 
 ## 4. .env 自动加载
 
