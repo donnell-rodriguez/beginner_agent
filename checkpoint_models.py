@@ -9,6 +9,7 @@ CheckpointBackend = Literal["memory", "postgres"]
 CheckpointHealthStatus = Literal["healthy", "warning", "degraded", "blocked"]
 CheckpointPersistenceGuarantee = Literal["none", "process", "durable"]
 CheckpointFallbackPolicy = Literal["allow_memory", "fail_fast"]
+CheckpointSetupMode = Literal["auto", "manual"]
 
 
 class CheckpointFallbackRiskDecision(BaseModel):
@@ -53,9 +54,36 @@ class CheckpointBackendConfig(BaseModel):
     require_thread_id: bool
     healthcheck_enabled: bool
     roundtrip_probe_enabled: bool
+    auto_setup_enabled: bool
+    setup_mode: CheckpointSetupMode
     checkpoint_namespace: str
     fallback_policy: CheckpointFallbackPolicy
     fallback_reason: str = ""
+
+
+class CheckpointSetupReport(BaseModel):
+    """Checkpoint schema setup / migration 报告。
+
+    中文注释：
+    生产环境不建议应用启动时自动建表。
+    这个模型给独立运维脚本使用：
+
+        python scripts/manage_checkpoint_schema.py setup
+
+    它会记录 setup 是否执行、执行前后 schema 状态是什么。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: CheckpointBackend
+    setup_mode: CheckpointSetupMode
+    setup_executed: bool
+    status_before: str
+    status_after: str
+    migration_version_before: str = "unknown"
+    migration_version_after: str = "unknown"
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CheckpointPostgresDiagnostics(BaseModel):

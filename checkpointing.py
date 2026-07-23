@@ -12,6 +12,7 @@ from beginner_agent.checkpoint_models import (
     CheckpointBackendConfig,
     CheckpointHealth,
     CheckpointPostgresDiagnostics,
+    CheckpointSetupReport,
 )
 
 
@@ -78,6 +79,21 @@ def checkpoint_roundtrip_probe_enabled() -> bool:
     return _bool_env("BEGINNER_AGENT_CHECKPOINT_HEALTHCHECK_ROUNDTRIP_ENABLED", True)
 
 
+def checkpoint_auto_setup_enabled() -> bool:
+    """应用启动时是否自动执行 PostgresSaver.setup()。
+
+    中文注释：
+    - true：本地开发默认值。build_graph() 时自动创建 LangGraph checkpoint 表。
+    - false：生产推荐。应用启动只创建 checkpointer，不自动改数据库 schema。
+
+    当它是 false 时，应该由独立运维命令执行：
+
+        python scripts/manage_checkpoint_schema.py setup
+    """
+
+    return _bool_env("BEGINNER_AGENT_CHECKPOINT_AUTO_SETUP", True)
+
+
 def checkpoint_namespace() -> str:
     """Checkpoint 命名空间。
 
@@ -128,6 +144,8 @@ def checkpoint_backend_config() -> CheckpointBackendConfig:
         require_thread_id=checkpoint_require_thread_id(),
         healthcheck_enabled=checkpoint_healthcheck_enabled(),
         roundtrip_probe_enabled=checkpoint_roundtrip_probe_enabled(),
+        auto_setup_enabled=checkpoint_auto_setup_enabled(),
+        setup_mode="auto" if checkpoint_auto_setup_enabled() else "manual",
         checkpoint_namespace=checkpoint_namespace(),
         fallback_policy="allow_memory" if allow_fallback else "fail_fast",
         fallback_reason=fallback_reason,
@@ -276,10 +294,88 @@ def _postgres_checkpointer() -> Any:
     )
     checkpointer = PostgresSaver(conn)
     # 中文注释：
-    # 第一次使用 Postgres checkpoint 时必须 setup。
-    # 它会创建 checkpoint_migrations / checkpoints / checkpoint_writes 等表。
-    checkpointer.setup()
+    # 本地开发可以自动 setup，减少第一次运行的门槛。
+    #
+    # 生产环境建议设置：
+    #
+    #     BEGINNER_AGENT_CHECKPOINT_AUTO_SETUP=false
+    #
+    # 这样应用启动不会自动改表，checkpoint schema 由独立 migration job 处理。
+    if checkpoint_auto_setup_enabled():
+        checkpointer.setup()
     return checkpointer
+
+
+def setup_checkpoint_schema() -> CheckpointSetupReport:
+    """显式执行 LangGraph Postgres checkpoint schema setup。
+
+    中文注释：
+    这是生产风格的“受控运维动作”入口。
+    应用启动可以禁止自动 setup，
+    但 CI/CD、运维脚本或本地命令可以显式调用这个函数创建/更新 checkpoint 表。
+    """
+
+    config = checkpoint_backend_config()
+    before = check_checkpoint_health()
+    if config.requested_backend != "postgres":
+        return CheckpointSetupReport(
+            backend=config.requested_backend,
+            setup_mode=config.setup_mode,
+            setup_executed=False,
+            status_before=before.setup_status,
+            status_after=before.setup_status,
+            migration_version_before=before.diagnostics.migration_version,
+            migration_version_after=before.diagnostics.migration_version,
+            warnings=["Checkpoint backend 不是 postgres，不需要执行 Postgres schema setup。"],
+        )
+    if not config.database_url_configured:
+        return CheckpointSetupReport(
+            backend="postgres",
+            setup_mode=config.setup_mode,
+            setup_executed=False,
+            status_before=before.setup_status,
+            status_after=before.setup_status,
+            migration_version_before=before.diagnostics.migration_version,
+            migration_version_after=before.diagnostics.migration_version,
+            errors=["缺少 BEGINNER_AGENT_CHECKPOINT_DATABASE_URL 或 DATABASE_URL。"],
+        )
+
+    try:
+        import psycopg
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+    except ImportError as exc:
+        return CheckpointSetupReport(
+            backend="postgres",
+            setup_mode=config.setup_mode,
+            setup_executed=False,
+            status_before=before.setup_status,
+            status_after=before.setup_status,
+            migration_version_before=before.diagnostics.migration_version,
+            migration_version_after=before.diagnostics.migration_version,
+            errors=[f"缺少 Postgres checkpoint 依赖：{exc}"],
+        )
+
+    with psycopg.connect(
+        _postgres_database_url(),
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+    ) as conn:
+        PostgresSaver(conn).setup()
+
+    after = check_checkpoint_health()
+    return CheckpointSetupReport(
+        backend="postgres",
+        setup_mode=config.setup_mode,
+        setup_executed=True,
+        status_before=before.setup_status,
+        status_after=after.setup_status,
+        migration_version_before=before.diagnostics.migration_version,
+        migration_version_after=after.diagnostics.migration_version,
+        errors=after.errors,
+        warnings=after.warnings,
+    )
 
 
 def build_checkpointer() -> Any:

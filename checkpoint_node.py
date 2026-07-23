@@ -69,6 +69,8 @@ def postgres_checkpoint_node(state: State) -> dict[str, Any]:
         "status": health.status,
         "persistent": health.persistent,
         "setup_status": health.setup_status,
+        "setup_mode": config.setup_mode,
+        "auto_setup_enabled": config.auto_setup_enabled,
         "diagnostics": health.diagnostics.model_dump(mode="json"),
         "resume_supported": recovery_contract.resume_supported,
         "fallback_risk_decision": fallback_risk_decision.model_dump(mode="json"),
@@ -100,6 +102,7 @@ def postgres_checkpoint_node(state: State) -> dict[str, Any]:
                     "Postgres Checkpoint："
                     f"backend={config.effective_backend}，"
                     f"status={health.status}，"
+                    f"setup_mode={config.setup_mode}，"
                     f"resume_supported={recovery_contract.resume_supported}。"
                 ),
             }

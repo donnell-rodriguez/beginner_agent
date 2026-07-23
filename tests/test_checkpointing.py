@@ -4,7 +4,11 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from beginner_agent.checkpoint_node import postgres_checkpoint_node, route_after_postgres_checkpoint
 import beginner_agent.checkpoint_observability as checkpoint_observability
-from beginner_agent.checkpointing import build_checkpointer, checkpoint_backend_config
+from beginner_agent.checkpointing import (
+    build_checkpointer,
+    checkpoint_auto_setup_enabled,
+    checkpoint_backend_config,
+)
 from beginner_agent.state_factory import create_initial_state
 
 
@@ -17,6 +21,7 @@ def _clear_checkpoint_env(monkeypatch) -> None:
         "BEGINNER_AGENT_CHECKPOINT_ALLOW_MEMORY_FALLBACK",
         "BEGINNER_AGENT_CHECKPOINT_REQUIRE_THREAD_ID",
         "BEGINNER_AGENT_CHECKPOINT_HEALTHCHECK_ENABLED",
+        "BEGINNER_AGENT_CHECKPOINT_AUTO_SETUP",
         "BEGINNER_AGENT_CHECKPOINT_NAMESPACE",
         "BEGINNER_AGENT_CHECKPOINT_REQUIRE_PERSISTENCE_FOR_AGENT",
         "BEGINNER_AGENT_CHECKPOINT_REQUIRE_PERSISTENCE_FOR_APPROVAL",
@@ -169,6 +174,27 @@ def test_checkpoint_node_reports_postgres_when_configured_without_live_healthche
     assert report["recovery_contract"]["resume_supported"] is True
     assert report["observability_event"]["event_type"] == "checkpoint_health"
     assert report["observability_event"]["diagnostics"]["roundtrip_status"] == "not_run"
+    assert report["observability_event"]["setup_mode"] == "auto"
+    assert report["observability_event"]["auto_setup_enabled"] is True
+
+
+def test_checkpoint_auto_setup_can_be_disabled(monkeypatch) -> None:
+    """生产模式可以关闭应用启动自动 setup。"""
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "postgres")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_DATABASE_URL", "postgresql://example")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_HEALTHCHECK_ENABLED", "false")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_AUTO_SETUP", "false")
+
+    config = checkpoint_backend_config()
+    result = postgres_checkpoint_node(create_initial_state("hello"))
+    report = result["checkpoint_report"]
+
+    assert checkpoint_auto_setup_enabled() is False
+    assert config.auto_setup_enabled is False
+    assert config.setup_mode == "manual"
+    assert report["observability_event"]["setup_mode"] == "manual"
 
 
 def test_checkpoint_observability_writes_jsonl_event(monkeypatch, tmp_path) -> None:
