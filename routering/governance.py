@@ -6,6 +6,7 @@ from typing import Any
 
 from ..config import load_project_env
 from .models import RouterContext
+from .model_strategy import select_router_stage_model
 from .prompts import RouterPromptSpec
 from .rules import RouterRuleSet
 from .security_models import SecurityPolicy
@@ -28,6 +29,8 @@ class RouterStageBudget:
 
     stage: str
     model: str
+    cheap_model: str
+    strong_model: str
     max_tokens: int
     timeout_ms: int
 
@@ -35,6 +38,8 @@ class RouterStageBudget:
         return {
             "stage": self.stage,
             "model": self.model,
+            "cheap_model": self.cheap_model,
+            "strong_model": self.strong_model,
             "max_tokens": self.max_tokens,
             "timeout_ms": self.timeout_ms,
         }
@@ -146,19 +151,7 @@ def load_router_governance_contract(
 def router_stage_model(stage_title: str) -> str:
     """读取某个 Router 子阶段应该使用的模型。"""
 
-    load_project_env()
-    key = stage_title.lower().replace(" ", "_").replace("-", "_")
-    env_by_key = {
-        "intent_router": "BEGINNER_AGENT_ROUTER_INTENT_MODEL",
-        "risk_router": "BEGINNER_AGENT_ROUTER_RISK_MODEL",
-        "tool_needs_router": "BEGINNER_AGENT_ROUTER_TOOL_NEEDS_MODEL",
-        "security_classifier": "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MODEL",
-        "intent_router_json_repair": "BEGINNER_AGENT_ROUTER_REPAIR_MODEL",
-        "risk_router_json_repair": "BEGINNER_AGENT_ROUTER_REPAIR_MODEL",
-        "tool_needs_router_json_repair": "BEGINNER_AGENT_ROUTER_REPAIR_MODEL",
-    }
-    env_name = env_by_key.get(key, "BEGINNER_AGENT_ROUTER_MODEL")
-    return os.getenv(env_name, os.getenv("BEGINNER_AGENT_ROUTER_MODEL", "")).strip()
+    return select_router_stage_model(stage_title).model
 
 
 def _stage_budget(
@@ -169,9 +162,14 @@ def _stage_budget(
     timeout_env: str,
     default_max_tokens: int,
 ) -> RouterStageBudget:
+    primary = select_router_stage_model(stage)
+    cheap = select_router_stage_model(stage, tier="cheap")
+    strong = select_router_stage_model(stage, tier="strong")
     return RouterStageBudget(
         stage=stage,
-        model=os.getenv(model_env, os.getenv("BEGINNER_AGENT_ROUTER_MODEL", "")).strip(),
+        model=primary.model or os.getenv(model_env, os.getenv("BEGINNER_AGENT_ROUTER_MODEL", "")).strip(),
+        cheap_model=cheap.model,
+        strong_model=strong.model,
         max_tokens=_env_int(max_tokens_env, default_max_tokens),
         timeout_ms=_env_int(timeout_env, 1000),
     )

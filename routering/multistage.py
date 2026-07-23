@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import cast
+from dataclasses import dataclass
+from typing import Any, Generic, cast
 
 from pydantic import ValidationError
 
 from ..state import RiskLevel, TaskType
 from .failure_policy import RouterFailurePolicy, load_router_failure_policy
 from .models import DecisionSource, RouterDecision, RouterSecuritySignal, RouterStageReport
+from .model_strategy import (
+    router_primary_model_tier,
+    select_router_stage_model,
+    should_retry_with_strong_model,
+)
 from .prompts import RouterPromptSpec
 from .rules import RouterRuleSet
 from .security_classifier import run_llm_security_classifier
@@ -16,8 +22,10 @@ from .pipeline.fallback import fallback_intent, fallback_risk, fallback_tool_nee
 from .pipeline.models import (
     IntentStageModel,
     MultiStageRouterResult,
+    RepairInfo,
     RiskStageModel,
     RouterStageDecision,
+    StageModelT,
     ToolNeedsStageModel,
 )
 from .pipeline.repair import parse_stage_model_with_repair
@@ -41,6 +49,16 @@ from .pipeline.runtime import call_stage_router
 #
 # 这样你阅读时可以先看本文件理解主流程，
 # 再按需进入对应模块看细节。
+
+
+@dataclass(frozen=True)
+class StageParseResult(Generic[StageModelT]):
+    parsed: StageModelT
+    repair: RepairInfo
+    response: str
+    model_name: str
+    model_tier: str
+    escalation_reason: str = ""
 
 
 def run_multistage_router(
@@ -177,7 +195,7 @@ def _run_intent_router(
     failure_policy: RouterFailurePolicy,
 ) -> RouterStageDecision:
     try:
-        response = call_stage_router(
+        result = _call_and_parse_stage(
             text,
             prompt=prompt,
             chat_completion=chat_completion,
@@ -189,18 +207,13 @@ def _run_intent_router(
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_INTENT_MAX_TOKENS",
             timeout_ms_env="BEGINNER_AGENT_ROUTER_INTENT_TIMEOUT_MS",
-        )
-        parsed, repair = parse_stage_model_with_repair(
-            response,
             model_cls=IntentStageModel,
             required_fields={"task_type"},
-            stage_title="Intent Router",
             schema_hint='{"task_type":"chat|search|write|agent","reason":"...","confidence":0.0-1.0}',
-            prompt=prompt,
-            chat_completion=chat_completion,
             failure_policy=failure_policy,
-            max_tokens_env="BEGINNER_AGENT_ROUTER_INTENT_MAX_TOKENS",
         )
+        parsed = result.parsed
+        response = result.response
         if parsed.confidence < min_confidence and failure_policy.low_confidence_policy == "fallback":
             return fallback_intent(text, rules, f"置信度 {parsed.confidence:.2f} 低于阈值。", response)
         return RouterStageDecision(
@@ -209,11 +222,14 @@ def _run_intent_router(
             reason=parsed.reason,
             confidence=parsed.confidence,
             source="llm",
-            model_response=repair.final_response or response,
-            repair_attempt_count=repair.attempt_count,
-            repair_success=repair.success,
-            raw_invalid_response=repair.raw_invalid_response,
-            validation_error_type=repair.validation_error_type,
+            model_response=result.repair.final_response or response,
+            repair_attempt_count=result.repair.attempt_count,
+            repair_success=result.repair.success,
+            raw_invalid_response=result.repair.raw_invalid_response,
+            validation_error_type=result.repair.validation_error_type,
+            model_name=result.model_name,
+            model_tier=result.model_tier,
+            escalation_reason=result.escalation_reason,
         )
     except (
         RuntimeError,
@@ -236,7 +252,7 @@ def _run_risk_router(
     failure_policy: RouterFailurePolicy,
 ) -> RouterStageDecision:
     try:
-        response = call_stage_router(
+        result = _call_and_parse_stage(
             text,
             prompt=prompt,
             chat_completion=chat_completion,
@@ -249,18 +265,13 @@ def _run_risk_router(
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_RISK_MAX_TOKENS",
             timeout_ms_env="BEGINNER_AGENT_ROUTER_RISK_TIMEOUT_MS",
-        )
-        parsed, repair = parse_stage_model_with_repair(
-            response,
             model_cls=RiskStageModel,
             required_fields={"risk_level"},
-            stage_title="Risk Router",
             schema_hint='{"risk_level":"low|medium|high","reason":"...","confidence":0.0-1.0}',
-            prompt=prompt,
-            chat_completion=chat_completion,
             failure_policy=failure_policy,
-            max_tokens_env="BEGINNER_AGENT_ROUTER_RISK_MAX_TOKENS",
         )
+        parsed = result.parsed
+        response = result.response
         if parsed.confidence < min_confidence and failure_policy.low_confidence_policy == "fallback":
             return fallback_risk(text, rules, f"置信度 {parsed.confidence:.2f} 低于阈值。", response)
         return RouterStageDecision(
@@ -269,11 +280,14 @@ def _run_risk_router(
             reason=parsed.reason,
             confidence=parsed.confidence,
             source="llm",
-            model_response=repair.final_response or response,
-            repair_attempt_count=repair.attempt_count,
-            repair_success=repair.success,
-            raw_invalid_response=repair.raw_invalid_response,
-            validation_error_type=repair.validation_error_type,
+            model_response=result.repair.final_response or response,
+            repair_attempt_count=result.repair.attempt_count,
+            repair_success=result.repair.success,
+            raw_invalid_response=result.repair.raw_invalid_response,
+            validation_error_type=result.repair.validation_error_type,
+            model_name=result.model_name,
+            model_tier=result.model_tier,
+            escalation_reason=result.escalation_reason,
         )
     except (
         RuntimeError,
@@ -302,7 +316,7 @@ def _run_tool_needs_router(
     failure_policy: RouterFailurePolicy,
 ) -> RouterStageDecision:
     try:
-        response = call_stage_router(
+        result = _call_and_parse_stage(
             text,
             prompt=prompt,
             chat_completion=chat_completion,
@@ -316,18 +330,13 @@ def _run_tool_needs_router(
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_TOOL_NEEDS_MAX_TOKENS",
             timeout_ms_env="BEGINNER_AGENT_ROUTER_TOOL_NEEDS_TIMEOUT_MS",
-        )
-        parsed, repair = parse_stage_model_with_repair(
-            response,
             model_cls=ToolNeedsStageModel,
             required_fields={"needs_tool"},
-            stage_title="Tool Needs Router",
             schema_hint='{"needs_tool":true,"reason":"...","confidence":0.0-1.0}',
-            prompt=prompt,
-            chat_completion=chat_completion,
             failure_policy=failure_policy,
-            max_tokens_env="BEGINNER_AGENT_ROUTER_TOOL_NEEDS_MAX_TOKENS",
         )
+        parsed = result.parsed
+        response = result.response
         if parsed.confidence < min_confidence and failure_policy.low_confidence_policy == "fallback":
             return fallback_tool_needs(intent, f"置信度 {parsed.confidence:.2f} 低于阈值。", response)
         return RouterStageDecision(
@@ -336,11 +345,14 @@ def _run_tool_needs_router(
             reason=parsed.reason,
             confidence=parsed.confidence,
             source="llm",
-            model_response=repair.final_response or response,
-            repair_attempt_count=repair.attempt_count,
-            repair_success=repair.success,
-            raw_invalid_response=repair.raw_invalid_response,
-            validation_error_type=repair.validation_error_type,
+            model_response=result.repair.final_response or response,
+            repair_attempt_count=result.repair.attempt_count,
+            repair_success=result.repair.success,
+            raw_invalid_response=result.repair.raw_invalid_response,
+            validation_error_type=result.repair.validation_error_type,
+            model_name=result.model_name,
+            model_tier=result.model_tier,
+            escalation_reason=result.escalation_reason,
         )
     except (
         RuntimeError,
@@ -370,6 +382,139 @@ def _security_stage_decision(
         confidence=0.9 if security.malicious_intent != "none" else 0.7,
         source="security_override" if security.malicious_intent != "none" else "llm",
         failure_policy_applied=policy_applied,
+    )
+
+
+def _call_and_parse_stage(
+    text: str,
+    *,
+    prompt: RouterPromptSpec,
+    chat_completion: Callable[..., str],
+    stage_title: str,
+    instruction: str,
+    max_tokens_env: str,
+    timeout_ms_env: str,
+    model_cls: type[StageModelT],
+    required_fields: set[str],
+    schema_hint: str,
+    failure_policy: RouterFailurePolicy,
+) -> StageParseResult[StageModelT]:
+    """按模型策略调用并解析一个 Router stage。"""
+
+    primary_tier = router_primary_model_tier()
+    primary = _call_parse_once(
+        text,
+        prompt=prompt,
+        chat_completion=chat_completion,
+        stage_title=stage_title,
+        instruction=instruction,
+        max_tokens_env=max_tokens_env,
+        timeout_ms_env=timeout_ms_env,
+        model_cls=model_cls,
+        required_fields=required_fields,
+        schema_hint=schema_hint,
+        failure_policy=failure_policy,
+        model_tier=primary_tier,
+    )
+    risk_level = getattr(primary.parsed, "risk_level", "")
+    should_retry, reason, _strong = should_retry_with_strong_model(
+        stage_title=stage_title,
+        confidence=float(getattr(primary.parsed, "confidence", 0.0)),
+        primary_model=primary.model_name,
+        risk_level=str(risk_level),
+    )
+    if not should_retry:
+        return primary
+    strong = _call_parse_once(
+        text,
+        prompt=prompt,
+        chat_completion=chat_completion,
+        stage_title=stage_title,
+        instruction=instruction,
+        max_tokens_env=max_tokens_env,
+        timeout_ms_env=timeout_ms_env,
+        model_cls=model_cls,
+        required_fields=required_fields,
+        schema_hint=schema_hint,
+        failure_policy=failure_policy,
+        model_tier="strong",
+    )
+    return _choose_stage_result(primary, strong, escalation_reason=reason)
+
+
+def _call_parse_once(
+    text: str,
+    *,
+    prompt: RouterPromptSpec,
+    chat_completion: Callable[..., str],
+    stage_title: str,
+    instruction: str,
+    max_tokens_env: str,
+    timeout_ms_env: str,
+    model_cls: type[StageModelT],
+    required_fields: set[str],
+    schema_hint: str,
+    failure_policy: RouterFailurePolicy,
+    model_tier: str,
+) -> StageParseResult[StageModelT]:
+    response = call_stage_router(
+        text,
+        prompt=prompt,
+        chat_completion=chat_completion,
+        stage_title=stage_title,
+        instruction=instruction,
+        max_tokens_env=max_tokens_env,
+        timeout_ms_env=timeout_ms_env,
+        model_tier=cast(Any, model_tier),
+    )
+    parsed, repair = parse_stage_model_with_repair(
+        response,
+        model_cls=model_cls,
+        required_fields=required_fields,
+        stage_title=stage_title,
+        schema_hint=schema_hint,
+        prompt=prompt,
+        chat_completion=chat_completion,
+        failure_policy=failure_policy,
+        max_tokens_env=max_tokens_env,
+    )
+    selection = select_router_stage_model(stage_title, tier=cast(Any, model_tier))
+    return StageParseResult(
+        parsed=parsed,
+        repair=repair,
+        response=response,
+        model_name=selection.model,
+        model_tier=model_tier,
+    )
+
+
+def _choose_stage_result(
+    primary: StageParseResult[StageModelT],
+    strong: StageParseResult[StageModelT],
+    *,
+    escalation_reason: str,
+) -> StageParseResult[StageModelT]:
+    primary_risk = getattr(primary.parsed, "risk_level", "")
+    strong_risk = getattr(strong.parsed, "risk_level", "")
+    if primary_risk == "high" and strong_risk != "high":
+        return StageParseResult(
+            parsed=primary.parsed,
+            repair=primary.repair,
+            response=primary.response,
+            model_name=primary.model_name,
+            model_tier=primary.model_tier,
+            escalation_reason=(
+                f"{escalation_reason}; strong_model={strong.model_name}; "
+                "conservative_keep_primary_high"
+            ),
+        )
+    return StageParseResult(
+        parsed=strong.parsed,
+        repair=strong.repair,
+        response=strong.response,
+        model_name=strong.model_name,
+        model_tier="strong",
+        escalation_reason=f"{escalation_reason}; primary_model={primary.model_name}",
     )
 
 

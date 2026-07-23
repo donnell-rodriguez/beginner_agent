@@ -6,6 +6,14 @@ from .models import RouterDecision, RouterEvalCase, RouterEvent, RouterSecurityS
 from .nodes import route_by_task, router_classifier_node
 from .governance import RouterGovernanceContract, RouterStageBudget, load_router_governance_contract
 from .metrics import RouterMetricsSnapshot, read_router_metrics
+from .model_strategy import (
+    RouterModelSelection,
+    router_high_risk_strong_validation_enabled,
+    router_model_escalation_enabled,
+    router_primary_model_tier,
+    router_strong_confidence_threshold,
+    select_router_stage_model,
+)
 from .multistage import (
     MultiStageRouterResult,
     RouterStageDecision,
@@ -83,6 +91,7 @@ __all__ = [
     "RouterConflict",
     "RouterGovernanceContract",
     "RouterMetricsSnapshot",
+    "RouterModelSelection",
     "RouterRegressionGateResult",
     "RouterReleaseGateResult",
     "RouterReviewItem",
@@ -128,8 +137,13 @@ __all__ = [
     "run_llm_security_classifier",
     "run_multistage_router",
     "select_router_prompt",
+    "select_router_stage_model",
     "security_classifier_enabled",
     "sanitize_router_input_for_prompt",
+    "router_high_risk_strong_validation_enabled",
+    "router_model_escalation_enabled",
+    "router_primary_model_tier",
+    "router_strong_confidence_threshold",
     "JsonlRouterObservabilitySink",
     "KafkaSpoolRouterObservabilitySink",
     "NullRouterObservabilitySink",

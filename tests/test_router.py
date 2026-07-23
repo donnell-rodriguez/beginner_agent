@@ -1203,6 +1203,81 @@ def test_router_stage_model_can_be_configured_per_stage(
     assert {item["stage"]: item["model"] for item in budgets}["intent_router"] == "intent-model"
 
 
+def test_router_low_confidence_escalates_from_cheap_to_strong_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低置信度时，Router 可以从 cheap model 升级 strong model。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_MODEL_ESCALATION_ENABLED", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER", "cheap")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_CHEAP_MODEL", "cheap-router")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_STRONG_MODEL", "strong-router")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_STRONG_CONFIDENCE_THRESHOLD", "0.80")
+    seen_models: list[str] = []
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        model = kwargs.get("model", "")
+        seen_models.append(str(model))
+        if "Intent Router" in system_prompt and model == "cheap-router":
+            return '{"task_type":"chat","reason":"cheap 不确定。","confidence":0.30}'
+        if "Intent Router" in system_prompt and model == "strong-router":
+            return '{"task_type":"agent","reason":"strong 识别为项目任务。","confidence":0.95}'
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"low","reason":"只读理解。","confidence":0.95}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":true,"reason":"需要读取项目文件。","confidence":0.95}'
+        raise AssertionError(f"{model}: {system_prompt}")
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("帮我理解项目结构"))
+    intent_stage = [
+        item for item in result["router_report"]["stage_reports"] if item["stage"] == "intent_router"
+    ][0]
+
+    assert result["task_type"] == "agent"
+    assert seen_models[:2] == ["cheap-router", "strong-router"]
+    assert "model_tier=strong" in intent_stage["reason"]
+    assert "confidence 0.30 < strong threshold 0.80" in intent_stage["reason"]
+
+
+def test_router_high_risk_strong_validation_keeps_conservative_high(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cheap 判断 high 后，即使 strong 判断 low，也要保守保留 high。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_MODEL_ESCALATION_ENABLED", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER", "cheap")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_CHEAP_MODEL", "cheap-router")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_STRONG_MODEL", "strong-router")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_HIGH_RISK_STRONG_VALIDATION_ENABLED", "true")
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        model = kwargs.get("model", "")
+        if "Intent Router" in system_prompt:
+            return '{"task_type":"agent","reason":"代码修改任务。","confidence":0.95}'
+        if "Risk Router" in system_prompt and model == "cheap-router":
+            return '{"risk_level":"high","reason":"cheap 认为涉及修改。","confidence":0.95}'
+        if "Risk Router" in system_prompt and model == "strong-router":
+            return '{"risk_level":"low","reason":"strong 误判低风险。","confidence":0.95}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":true,"reason":"需要工具。","confidence":0.95}'
+        raise AssertionError(f"{model}: {system_prompt}")
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("帮我 apply_patch 修改代码"))
+    risk_stage = [
+        item for item in result["router_report"]["stage_reports"] if item["stage"] == "risk_router"
+    ][0]
+
+    assert result["risk_level"] == "high"
+    assert "conservative_keep_primary_high" in risk_stage["reason"]
+    assert result["router_report"]["review"]["required"] is True
+
+
 def test_router_stage_timeouts_are_passed_to_llm_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

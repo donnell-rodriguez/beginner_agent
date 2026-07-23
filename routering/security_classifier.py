@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from ..config import load_project_env
 from ..node_utils import json_loads_from_model
 from .models import InjectionRisk, MaliciousIntent, RouterSecuritySignal
+from .model_strategy import router_primary_model_tier
 from .pipeline.models import RouterStageDecision, SecurityClassifierStageModel
 from .pipeline.runtime import call_stage_router
 from .prompts import RouterPromptSpec
@@ -64,6 +65,7 @@ def run_llm_security_classifier(
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MAX_TOKENS",
             timeout_ms_env="BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_TIMEOUT_MS",
+            model_tier=router_primary_model_tier(),
         )
         parsed = _parse_security_classifier_response(response)
         llm_security = RouterSecuritySignal(

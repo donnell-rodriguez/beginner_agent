@@ -28,6 +28,12 @@ def build_multistage_reports(result: MultiStageRouterResult) -> list[RouterStage
             reason = f"{reason}；failure_policy={stage.failure_policy_applied}"
         if stage.model_error:
             reason = f"{reason}；model_error={stage.model_error}"
+        if stage.model_tier:
+            reason = f"{reason}；model_tier={stage.model_tier}"
+        if stage.model_name:
+            reason = f"{reason}；model={stage.model_name}"
+        if stage.escalation_reason:
+            reason = f"{reason}；escalation={stage.escalation_reason}"
         reports.append(
             RouterStageReport(
                 stage=stage.stage,

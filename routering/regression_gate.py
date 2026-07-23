@@ -216,6 +216,12 @@ def current_router_config_fingerprint() -> RouterConfigFingerprint:
         "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MODEL",
         "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_MAX_TOKENS",
         "BEGINNER_AGENT_ROUTER_SECURITY_CLASSIFIER_TIMEOUT_MS",
+        "BEGINNER_AGENT_ROUTER_CHEAP_MODEL",
+        "BEGINNER_AGENT_ROUTER_STRONG_MODEL",
+        "BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER",
+        "BEGINNER_AGENT_ROUTER_MODEL_ESCALATION_ENABLED",
+        "BEGINNER_AGENT_ROUTER_STRONG_CONFIDENCE_THRESHOLD",
+        "BEGINNER_AGENT_ROUTER_HIGH_RISK_STRONG_VALIDATION_ENABLED",
     )
     files = tuple(_file_fingerprint(name) for name in file_env_names)
     env = {name: os.getenv(name, "") for name in value_env_names}

@@ -182,6 +182,9 @@ class RouterStageDecision:
     raw_invalid_response: str = ""
     validation_error_type: str = ""
     failure_policy_applied: str = ""
+    model_name: str = ""
+    model_tier: str = ""
+    escalation_reason: str = ""
 
     def failure_audit(self) -> dict[str, Any] | None:
         """生成结构化失败审计信息。"""
@@ -204,6 +207,9 @@ class RouterStageDecision:
             "raw_invalid_response": self.raw_invalid_response,
             "validation_error_type": self.validation_error_type,
             "failure_policy_applied": self.failure_policy_applied,
+            "model_name": self.model_name,
+            "model_tier": self.model_tier,
+            "escalation_reason": self.escalation_reason,
         }
 
 
