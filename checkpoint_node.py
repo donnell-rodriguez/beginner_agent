@@ -53,6 +53,7 @@ def postgres_checkpoint_node(state: State) -> dict[str, Any]:
         "status": health.status,
         "persistent": health.persistent,
         "setup_status": health.setup_status,
+        "diagnostics": health.diagnostics.model_dump(mode="json"),
         "resume_supported": recovery_contract.resume_supported,
         "warnings": health.warnings,
         "errors": health.errors,

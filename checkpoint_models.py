@@ -28,9 +28,34 @@ class CheckpointBackendConfig(BaseModel):
     allow_memory_fallback: bool
     require_thread_id: bool
     healthcheck_enabled: bool
+    roundtrip_probe_enabled: bool
     checkpoint_namespace: str
     fallback_policy: CheckpointFallbackPolicy
     fallback_reason: str = ""
+
+
+class CheckpointPostgresDiagnostics(BaseModel):
+    """Postgres checkpoint 深度健康诊断。
+
+    中文注释：
+    生产级 health check 不只看“能不能连上数据库”。
+    它还会看延迟、checkpoint 表、迁移状态、锁等待、数据库大小、
+    以及能不能真实写入再读回一条 probe 记录。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_latency_ms: int | None = None
+    roundtrip_status: str = "not_run"
+    roundtrip_latency_ms: int | None = None
+    migration_version: str = "unknown"
+    checkpoint_table_count: int = 0
+    checkpoint_table_bytes: int = 0
+    checkpoint_index_bytes: int = 0
+    waiting_lock_count: int = 0
+    database_size_bytes: int = 0
+    probe_table: str = "beginner_agent_checkpoint_health_probe"
+    notes: list[str] = Field(default_factory=list)
 
 
 class CheckpointRecoveryContract(BaseModel):
@@ -72,6 +97,7 @@ class CheckpointHealth(BaseModel):
     persistent: bool
     database_url_configured: bool
     setup_status: str
+    diagnostics: CheckpointPostgresDiagnostics = Field(default_factory=CheckpointPostgresDiagnostics)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
@@ -97,4 +123,3 @@ class CheckpointReport(BaseModel):
     recovery_contract: CheckpointRecoveryContract
     observability_event: dict[str, Any]
     reason: str
-

@@ -93,9 +93,11 @@ def test_checkpoint_node_reports_postgres_when_configured_without_live_healthche
     assert report["persistent"] is True
     assert report["health"]["status"] == "healthy"
     assert report["health"]["setup_status"] == "assumed_runtime_setup"
+    assert report["health"]["diagnostics"]["roundtrip_status"] == "not_run"
     assert report["recovery_contract"]["checkpoint_namespace"] == "unit-test"
     assert report["recovery_contract"]["resume_supported"] is True
     assert report["observability_event"]["event_type"] == "checkpoint_health"
+    assert report["observability_event"]["diagnostics"]["roundtrip_status"] == "not_run"
 
 
 def test_checkpoint_observability_writes_jsonl_event(monkeypatch, tmp_path) -> None:
