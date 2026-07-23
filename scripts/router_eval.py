@@ -17,6 +17,7 @@ from beginner_agent.routering.eval_runner import (
 )
 from beginner_agent.routering.feedback import read_router_feedback, record_router_correction
 from beginner_agent.routering.models import RouterDecision
+from beginner_agent.routering.regression_gate import evaluate_router_regression_gate
 from beginner_agent.state_factory import create_initial_state
 
 
@@ -58,8 +59,11 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         max_failures=args.max_failures,
     )
     append_router_eval_trend(run)
-    print(json.dumps(run.as_dict(), ensure_ascii=False, indent=2))
-    return 0 if run.failed == 0 else 1
+    gate = evaluate_router_regression_gate(run)
+    payload = run.as_dict()
+    payload["regression_gate"] = gate.as_dict()
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if gate.passed else 1
 
 
 def _cmd_feedback(args: argparse.Namespace) -> int:

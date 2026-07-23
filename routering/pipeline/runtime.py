@@ -4,6 +4,7 @@ import os
 from collections.abc import Callable
 
 from ...config import load_project_env
+from ..governance import router_stage_model
 from ..prompts import RouterPromptSpec
 
 
@@ -23,6 +24,13 @@ def call_stage_router(
 ) -> str:
     """调用某一个 Router 子阶段。"""
 
+    model = router_stage_model(stage_title)
+    kwargs = {
+        "temperature": prompt.temperature,
+        "max_tokens": stage_max_tokens(max_tokens_env, prompt.max_tokens),
+    }
+    if model:
+        kwargs["model"] = model
     return chat_completion(
         [
             {
@@ -31,8 +39,7 @@ def call_stage_router(
             },
             {"role": "user", "content": text},
         ],
-        temperature=prompt.temperature,
-        max_tokens=stage_max_tokens(max_tokens_env, prompt.max_tokens),
+        **kwargs,
     )
 
 

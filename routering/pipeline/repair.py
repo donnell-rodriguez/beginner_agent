@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from ...node_utils import json_loads_from_model
 from ..failure_policy import RouterFailurePolicy
+from ..governance import router_stage_model
 from ..prompts import RouterPromptSpec
 from .models import ROUTER_DECISION_FIELDS, RepairInfo, StageModelT
 from .runtime import stage_max_tokens
@@ -95,6 +96,13 @@ def _call_repair_router(
 ) -> str:
     """请求模型修复 Router 子阶段 JSON。"""
 
+    model = router_stage_model(f"{stage_title} JSON Repair")
+    kwargs = {
+        "temperature": 0,
+        "max_tokens": stage_max_tokens(max_tokens_env, prompt.max_tokens),
+    }
+    if model:
+        kwargs["model"] = model
     return chat_completion(
         [
             {
@@ -115,6 +123,5 @@ def _call_repair_router(
                 ),
             },
         ],
-        temperature=0,
-        max_tokens=stage_max_tokens(max_tokens_env, prompt.max_tokens),
+        **kwargs,
     )

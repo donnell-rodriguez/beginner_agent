@@ -14,6 +14,7 @@ from .eval import evaluate_router_prediction, summarize_router_eval_results
 from .eval_models import RouterEvalDataset, RouterEvalFailure, RouterEvalRun, RouterFeedbackRecord
 from .models import RouterDecision, RouterEvalCase
 from .observability import append_router_eval_case
+from .regression_gate import evaluate_router_regression_gate
 from .sinks import ROUTER_DIR
 
 
@@ -152,7 +153,9 @@ def append_router_eval_trend(run: RouterEvalRun) -> None:
     """把一次 eval run 写入趋势文件。"""
 
     records = _read_jsonl(ROUTER_EVAL_TRENDS_FILE)
-    records.append(run.as_dict())
+    payload = run.as_dict()
+    payload["regression_gate"] = evaluate_router_regression_gate(run).as_dict()
+    records.append(payload)
     limit = _positive_int_env("BEGINNER_AGENT_MAX_ROUTER_EVAL_TRENDS", 500)
     _write_jsonl(ROUTER_EVAL_TRENDS_FILE, records[-limit:])
 

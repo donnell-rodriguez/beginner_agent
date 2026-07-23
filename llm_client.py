@@ -108,6 +108,7 @@ def chat_completion(
     *,
     temperature: float = 0.2,
     max_tokens: int = 512,
+    model: str | None = None,
 ) -> str:
     # 中文注释：
     # base_url.rstrip("/") 去掉末尾多余的斜杠。
@@ -130,6 +131,8 @@ def chat_completion(
     # payload 是 HTTP 请求体。
     #
     # model：指定使用哪个模型。
+    #   如果调用方传入 model，就使用调用方指定的模型。
+    #   否则使用 .env 里的 OMLX_MODEL。
     # messages：对话消息列表。
     # temperature：生成随机性，越低越稳定。
     # max_tokens：最多生成多少 token。
@@ -139,7 +142,7 @@ def chat_completion(
     #   enable_thinking=False 表示尽量关闭模型显式思考输出。
     #   preserve_thinking=False 表示不要把历史 thinking 内容保留下来。
     payload = {
-        "model": OMLX_MODEL,
+        "model": model or OMLX_MODEL,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,

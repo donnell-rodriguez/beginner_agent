@@ -4,6 +4,7 @@ import json
 import os
 import hashlib
 import time
+from dataclasses import replace
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -13,12 +14,18 @@ from ..llm_client import chat_completion
 from ..node_utils import json_loads_from_model
 from ..state import RiskLevel, State, TaskType
 from .context import apply_context_policy, load_router_context
+from .conflicts import detect_router_conflicts
+from .governance import load_router_governance_contract
+from .metrics import update_router_metrics
 from .models import RouterDecision, RouterEvent, RouterSecuritySignal, RouterStageReport
 from .multistage import build_multistage_reports, run_multistage_router
 from .observability import append_router_event
 from .prompts import select_router_prompt
+from .review import append_router_review_item, build_router_review_item
 from .rules import RouterRuleSet, load_router_rules
 from .security import classify_router_security
+from .security_config import load_security_policy
+from .sanitization import sanitize_router_input_for_prompt
 
 
 # 中文注释：
@@ -262,13 +269,23 @@ def router_classifier_node(state: State) -> dict[str, Any]:
 
     # 中文注释：
     # rules：配置化规则集。
+    # security_policy：安全策略版本。
     # security：prompt injection / 数据外泄 / 高风险动作信号。
     # context：tenant / workspace / project / user 上下文。
+    # sanitized_input：交给 LLM Router 的脱敏输入。
     rules = load_router_rules()
-    security = classify_router_security(text)
+    security_policy = load_security_policy()
+    security = classify_router_security(text, policy=security_policy)
     context = load_router_context()
     prompt = select_router_prompt(text)
     min_confidence = _router_min_confidence()
+    governance_contract = load_router_governance_contract(
+        prompt=prompt,
+        rules=rules,
+        security_policy=security_policy,
+        context=context,
+    )
+    sanitized_input = sanitize_router_input_for_prompt(text)
 
     # 中文注释：
     # 第一层现在不是“一次模型调用决定所有字段”，
@@ -282,7 +299,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     # 每个阶段都可以独立 fallback，
     # 也可以在未来换成不同模型或不同规则集。
     multistage = run_multistage_router(
-        text,
+        sanitized_input.sanitized_text,
         rules=rules,
         security=security,
         prompt=prompt,
@@ -303,6 +320,15 @@ def router_classifier_node(state: State) -> dict[str, Any]:
     if context_decision != decision:
         decision = context_decision
         decision_source = "security_override"
+
+    conflicts = detect_router_conflicts(
+        text=text,
+        decision=decision,
+        rules=rules,
+        security=security,
+        context_policy_reason=context_policy_reason,
+        low_confidence_threshold=min_confidence,
+    )
 
     # 中文注释：
     # 构造多级 Router 报告。
@@ -351,6 +377,32 @@ def router_classifier_node(state: State) -> dict[str, Any]:
         model_error=model_error,
         fallback_reason=fallback_reason,
         failure_audit=multistage.failure_audit,
+        governance_contract=governance_contract.as_dict(),
+        conflicts=tuple(conflict.as_dict() for conflict in conflicts),
+        sanitized_input=sanitized_input.as_dict(),
+    )
+    review_item = build_router_review_item(
+        event,
+        conflicts=conflicts,
+        max_total_latency_ms=governance_contract.max_total_latency_ms,
+    )
+    if review_item is not None:
+        try:
+            append_router_review_item(review_item)
+        except OSError:
+            # 中文注释：
+            # 复核队列写入失败不能拖垮 Router 主路径。
+            # 后续 observability / metrics 仍会记录 review_required。
+            pass
+    metrics_snapshot = update_router_metrics(
+        event,
+        conflict_count=len(conflicts),
+        human_review_required=review_item is not None,
+    )
+    event = replace(
+        event,
+        metrics_snapshot=metrics_snapshot.as_dict(),
+        review=review_item.as_dict() if review_item is not None else {"required": False},
     )
     append_router_event(event)
     router_report = event.as_dict()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -285,6 +285,28 @@ class RouterEvent:
     failure_audit: tuple[dict[str, Any], ...] = ()
 
     # 中文注释：
+    # governance_contract 记录本次 Router 用到的版本合同：
+    # router / prompt / rules / security policy / stage budget。
+    governance_contract: dict[str, Any] = field(default_factory=dict)
+
+    # 中文注释：
+    # conflicts 记录 LLM、规则、安全、上下文策略之间的冲突。
+    conflicts: tuple[dict[str, Any], ...] = ()
+
+    # 中文注释：
+    # metrics_snapshot 是本次事件写入后得到的指标快照。
+    # 它让本地调试也能看到 request_total、fallback_total、latency 等趋势。
+    metrics_snapshot: dict[str, Any] = field(default_factory=dict)
+
+    # 中文注释：
+    # review 记录是否进入人工复核队列。
+    review: dict[str, Any] = field(default_factory=dict)
+
+    # 中文注释：
+    # sanitized_input 记录是否对 prompt 输入做了 secret / PII 脱敏。
+    sanitized_input: dict[str, Any] = field(default_factory=dict)
+
+    # 中文注释：
     # created_at 是事件创建时间。
     # 如果外部没有传入，就在 as_dict() 里自动生成当前 UTC 时间。
     created_at: str = ""
@@ -307,6 +329,11 @@ class RouterEvent:
             "model_error": self.model_error,
             "fallback_reason": self.fallback_reason,
             "failure_audit": list(self.failure_audit),
+            "governance_contract": self.governance_contract,
+            "conflicts": list(self.conflicts),
+            "metrics_snapshot": self.metrics_snapshot,
+            "review": self.review,
+            "sanitized_input": self.sanitized_input,
             "created_at": self.created_at
             # .isoformat() 会把 datetime 对象转换为字符串
             or datetime.now(timezone.utc).isoformat(),
@@ -337,6 +364,15 @@ class RouterEvalCase:
     reason: str = ""
 
     # 中文注释：
+    # category 用于把 eval dataset 分层。
+    # 例如 normal_chat / code_agent / high_risk / prompt_injection / secret_pii。
+    category: str = "general"
+
+    # 中文注释：
+    # tags 保存更细的样本标签，方便后续统计哪个能力退化。
+    tags: tuple[str, ...] = ()
+
+    # 中文注释：
     # created_at 保存 eval case 生成时间。
     created_at: str = ""
 
@@ -349,5 +385,7 @@ class RouterEvalCase:
             "expected_risk_level": self.expected_risk_level,
             "expected_needs_tool": self.expected_needs_tool,
             "reason": self.reason,
+            "category": self.category,
+            "tags": list(self.tags),
             "created_at": self.created_at or datetime.now(timezone.utc).isoformat(),
         }

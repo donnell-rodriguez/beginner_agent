@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from .context import apply_context_policy, load_router_context
+from .conflicts import RouterConflict, detect_router_conflicts
 from .models import RouterDecision, RouterEvalCase, RouterEvent, RouterSecuritySignal
 from .nodes import route_by_task, router_classifier_node
+from .governance import RouterGovernanceContract, RouterStageBudget, load_router_governance_contract
+from .metrics import RouterMetricsSnapshot, read_router_metrics
 from .multistage import (
     MultiStageRouterResult,
     RouterStageDecision,
@@ -16,6 +19,9 @@ from .observability import (
     read_router_eval_cases,
 )
 from .prompts import RouterPromptSpec, select_router_prompt
+from .regression_gate import RouterRegressionGateResult, evaluate_router_regression_gate
+from .review import RouterReviewItem, read_router_review_queue
+from .sanitization import RouterSanitizedInput, sanitize_router_input_for_prompt
 from .eval import (
     classify_router_eval_failure,
     evaluate_router_prediction,
@@ -57,9 +63,16 @@ __all__ = [
     "RouterFeedbackResult",
     "RouterObservabilitySink",
     "RouterPromptSpec",
+    "RouterConflict",
+    "RouterGovernanceContract",
+    "RouterMetricsSnapshot",
+    "RouterRegressionGateResult",
+    "RouterReviewItem",
     "RouterRule",
     "RouterRuleSet",
+    "RouterSanitizedInput",
     "RouterStageDecision",
+    "RouterStageBudget",
     "RouterSecuritySignal",
     "route_by_task",
     "router_classifier_node",
@@ -76,16 +89,22 @@ __all__ = [
     "classify_router_security",
     "classify_router_eval_failure",
     "evaluate_router_prediction",
+    "evaluate_router_regression_gate",
+    "detect_router_conflicts",
+    "load_router_governance_contract",
     "load_router_eval_dataset",
     "load_router_context",
     "load_router_rules",
     "read_router_eval_cases",
     "read_router_eval_trends",
     "read_router_feedback",
+    "read_router_metrics",
+    "read_router_review_queue",
     "record_router_correction",
     "run_router_eval",
     "run_multistage_router",
     "select_router_prompt",
+    "sanitize_router_input_for_prompt",
     "JsonlRouterObservabilitySink",
     "KafkaSpoolRouterObservabilitySink",
     "NullRouterObservabilitySink",

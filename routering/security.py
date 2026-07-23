@@ -21,10 +21,14 @@ from .security_models import SecurityFinding, SecurityPattern, SecurityPolicy
 # - security_detectors.py：secret/PII/历史滥用检测和风险选择。
 
 
-def classify_router_security(text: str) -> RouterSecuritySignal:
+def classify_router_security(
+    text: str,
+    *,
+    policy: SecurityPolicy | None = None,
+) -> RouterSecuritySignal:
     """识别 Router 层的恶意意图和 prompt injection 风险。"""
 
-    policy = load_security_policy()
+    policy = policy or load_security_policy()
     findings: list[SecurityFinding] = []
 
     for pattern in sorted(policy.patterns, key=lambda item: item.priority, reverse=True):

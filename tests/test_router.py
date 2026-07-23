@@ -8,6 +8,7 @@ from beginner_agent.routering.eval import (
     summarize_router_eval_results,
 )
 from beginner_agent.routering.eval_models import RouterEvalDataset
+from beginner_agent.routering.eval_models import RouterEvalRun
 from beginner_agent.routering.eval_runner import (
     append_router_eval_trend,
     append_router_feedback,
@@ -18,13 +19,17 @@ from beginner_agent.routering.eval_runner import (
 )
 from beginner_agent.routering.feedback import read_router_feedback, record_router_correction
 from beginner_agent.routering.models import RouterEvalCase
+from beginner_agent.routering.metrics import read_router_metrics
 from beginner_agent.routering.observability import (
     append_router_eval_case,
     last_router_event_error,
     read_router_eval_cases,
 )
 from beginner_agent.routering.prompts import select_router_prompt
+from beginner_agent.routering.regression_gate import evaluate_router_regression_gate
+from beginner_agent.routering.review import read_router_review_queue
 from beginner_agent.routering.rules import RouterRule, RouterRuleSet, load_router_rules
+from beginner_agent.routering.sanitization import sanitize_router_input_for_prompt
 from beginner_agent.routering.security import classify_router_security
 from beginner_agent.state_factory import create_initial_state
 
@@ -35,6 +40,8 @@ def isolated_router_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     import beginner_agent.routering.sinks as sinks
     import beginner_agent.routering.eval_runner as eval_runner
+    import beginner_agent.routering.metrics as metrics
+    import beginner_agent.routering.review as review
 
     router_dir = tmp_path / "router"
     monkeypatch.setenv("BEGINNER_AGENT_ROUTER_OBSERVABILITY_ENABLED", "true")
@@ -53,6 +60,8 @@ def isolated_router_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         "ROUTER_EVAL_TRENDS_FILE",
         router_dir / "router_eval_trends.jsonl",
     )
+    monkeypatch.setattr(metrics, "ROUTER_METRICS_FILE", router_dir / "router_metrics.json")
+    monkeypatch.setattr(review, "ROUTER_REVIEW_QUEUE_FILE", router_dir / "router_review_queue.jsonl")
 
 
 def test_router_parses_string_false_as_false(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1012,3 +1021,133 @@ def test_router_correction_can_lookup_event_by_decision_id(
     assert result.event.user_input == "帮我看一下 graph.py"
     assert result.event.decision_id == decision_id
     assert duplicate.duplicate is True
+
+
+def test_router_redacts_sensitive_input_before_llm_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Router 安全分类看原文，但 LLM 子阶段只能看到脱敏后的输入。"""
+
+    seen_user_messages: list[str] = []
+
+    def fake_chat_completion(messages, **kwargs):
+        seen_user_messages.append(messages[1]["content"])
+        system_prompt = messages[0]["content"]
+        if "Intent Router" in system_prompt:
+            return '{"task_type":"chat","reason":"普通问答。","confidence":0.9}'
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"low","reason":"普通问答。","confidence":0.9}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":false,"reason":"不需要工具。","confidence":0.9}'
+        raise AssertionError(system_prompt)
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+    secret = "sk-test1234567890abcdef"
+
+    result = router.router_classifier_node(create_initial_state(f"请总结这个 token: {secret}"))
+
+    assert result["router_report"]["sanitized_input"]["redacted"] is True
+    assert secret not in "\n".join(seen_user_messages)
+    assert "[REDACTED_SECRET]" in "\n".join(seen_user_messages)
+
+
+def test_router_event_contains_governance_contract_conflicts_metrics_and_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RouterEvent 要带版本合同、冲突、metrics 和复核队列信息。"""
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        if "Intent Router" in system_prompt:
+            return '{"task_type":"chat","reason":"模型低估了文件阅读请求","confidence":0.95}'
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"low","reason":"只读请求风险低","confidence":0.95}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":false,"reason":"模型误判为不需要工具","confidence":0.95}'
+        raise AssertionError(system_prompt)
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("帮我看一下 graph.py"))
+    report = result["router_report"]
+    queue = read_router_review_queue()
+    metrics = read_router_metrics()
+
+    assert report["governance_contract"]["router_version"]
+    assert report["governance_contract"]["ruleset_version"]
+    assert report["governance_contract"]["security_policy_version"]
+    assert report["conflicts"]
+    assert any(item["kind"] == "task_type_rule_conflict" for item in report["conflicts"])
+    assert report["review"]["required"] is True
+    assert queue[-1]["decision_id"] == report["decision_id"]
+    assert metrics.request_total >= 1
+    assert report["metrics_snapshot"]["request_total"] >= 1
+
+
+def test_router_stage_model_can_be_configured_per_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """每个 Router 子阶段可以通过 env 指定模型。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_INTENT_MODEL", "intent-model")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_RISK_MODEL", "risk-model")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_TOOL_NEEDS_MODEL", "tool-model")
+    stage_models: dict[str, str] = {}
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        if "Intent Router" in system_prompt:
+            stage_models["intent"] = kwargs.get("model", "")
+            return '{"task_type":"chat","reason":"普通问答。","confidence":0.9}'
+        if "Risk Router" in system_prompt:
+            stage_models["risk"] = kwargs.get("model", "")
+            return '{"risk_level":"low","reason":"普通问答。","confidence":0.9}'
+        if "Tool Needs Router" in system_prompt:
+            stage_models["tool"] = kwargs.get("model", "")
+            return '{"needs_tool":false,"reason":"不需要工具。","confidence":0.9}'
+        raise AssertionError(system_prompt)
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+
+    assert stage_models == {
+        "intent": "intent-model",
+        "risk": "risk-model",
+        "tool": "tool-model",
+    }
+    budgets = result["router_report"]["governance_contract"]["stage_budgets"]
+    assert {item["stage"]: item["model"] for item in budgets}["intent_router"] == "intent-model"
+
+
+def test_router_regression_gate_marks_bad_eval_run_failed() -> None:
+    """Router eval 门禁会根据阈值拒绝退化的 run。"""
+
+    run = RouterEvalRun(
+        run_id="gate-test",
+        dataset_version="dataset-v1",
+        router_version="router-v1",
+        total=10,
+        passed=7,
+        failed=3,
+        pass_rate=0.7,
+        task_type_accuracy=0.8,
+        risk_level_accuracy=0.7,
+        needs_tool_accuracy=0.9,
+    )
+
+    gate = evaluate_router_regression_gate(run)
+
+    assert gate.passed is False
+    assert any("pass_rate" in reason for reason in gate.reasons)
+
+
+def test_router_sanitization_helper_reports_labels() -> None:
+    """脱敏 helper 会返回标签，方便审计。"""
+
+    result = sanitize_router_input_for_prompt("邮箱 user@example.com，key=sk-test1234567890abcdef")
+
+    assert result.redacted is True
+    assert "user@example.com" not in result.sanitized_text
+    assert "sk-test1234567890abcdef" not in result.sanitized_text
+    assert result.redaction_labels
