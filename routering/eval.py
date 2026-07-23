@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .models import RouterDecision
+from .eval_categories import normalize_router_eval_category
 
 
 def classify_router_eval_failure(mismatches: list[str]) -> str:
@@ -54,6 +55,8 @@ def evaluate_router_prediction(
     failure_category = classify_router_eval_failure(mismatches)
     return {
         "passed": not mismatches,
+        "category": normalize_router_eval_category(case.get("category", "general")),
+        "tags": list(case.get("tags", [])) if isinstance(case.get("tags", []), list) else [],
         "checks": checks,
         "mismatches": mismatches,
         "failure_category": failure_category,
@@ -82,6 +85,7 @@ def summarize_router_eval_results(results: list[dict[str, Any]]) -> dict[str, An
         if category == "none":
             continue
         failure_categories[category] = failure_categories.get(category, 0) + 1
+    category_metrics = _summarize_by_category(results)
     return {
         "total": total,
         "passed": passed,
@@ -91,4 +95,51 @@ def summarize_router_eval_results(results: list[dict[str, Any]]) -> dict[str, An
         "risk_level_accuracy": risk_passed / total if total else 0.0,
         "needs_tool_accuracy": tool_passed / total if total else 0.0,
         "failure_categories": failure_categories,
+        "category_metrics": category_metrics,
     }
+
+
+def _summarize_by_category(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """按 eval category 汇总指标。
+
+    中文注释：
+    总体 pass_rate 可能很好看，但某个关键类别可能已经坏了。
+    例如 normal_chat_cases 100%，prompt_injection_cases 0%，总体也可能不低。
+    所以生产级 Router eval 必须按类别拆开看。
+    """
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in results:
+        category = normalize_router_eval_category(item.get("category", "general"))
+        grouped.setdefault(category, []).append(item)
+
+    metrics: dict[str, dict[str, Any]] = {}
+    for category, items in grouped.items():
+        total = len(items)
+        passed = sum(1 for item in items if item.get("passed") is True)
+        task_type_passed = sum(
+            1 for item in items if item.get("checks", {}).get("task_type") is True
+        )
+        risk_passed = sum(
+            1 for item in items if item.get("checks", {}).get("risk_level") is True
+        )
+        tool_passed = sum(
+            1 for item in items if item.get("checks", {}).get("needs_tool") is True
+        )
+        failure_categories: dict[str, int] = {}
+        for item in items:
+            failure_category = str(item.get("failure_category", "unknown_mismatch"))
+            if failure_category == "none":
+                continue
+            failure_categories[failure_category] = failure_categories.get(failure_category, 0) + 1
+        metrics[category] = {
+            "total": total,
+            "passed": passed,
+            "failed": total - passed,
+            "pass_rate": passed / total if total else 0.0,
+            "task_type_accuracy": task_type_passed / total if total else 0.0,
+            "risk_level_accuracy": risk_passed / total if total else 0.0,
+            "needs_tool_accuracy": tool_passed / total if total else 0.0,
+            "failure_categories": failure_categories,
+        }
+    return metrics

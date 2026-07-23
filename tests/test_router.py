@@ -1040,7 +1040,7 @@ def test_router_eval_prediction_scores_decision() -> None:
 
 
 def test_router_eval_batch_replay_and_failure_attribution() -> None:
-    """批量 replay 会生成 run 指标、字段准确率和失败归因。"""
+    """批量 replay 会生成 run 指标、字段准确率、分层指标和失败归因。"""
 
     dataset = RouterEvalDataset(
         version="router-eval-test-v1",
@@ -1052,6 +1052,7 @@ def test_router_eval_batch_replay_and_failure_attribution() -> None:
                 "expected_risk_level": "low",
                 "expected_needs_tool": False,
                 "reason": "普通问答。",
+                "category": "normal_chat_cases",
             },
             {
                 "user_input": "帮我修改代码",
@@ -1059,6 +1060,7 @@ def test_router_eval_batch_replay_and_failure_attribution() -> None:
                 "expected_risk_level": "high",
                 "expected_needs_tool": True,
                 "reason": "代码修改要进入 agent。",
+                "category": "code_agent_cases",
             },
         ),
     )
@@ -1086,6 +1088,8 @@ def test_router_eval_batch_replay_and_failure_attribution() -> None:
     assert run.failed == 1
     assert run.pass_rate == 0.5
     assert run.failures[0].failure_category == "multi_field_mismatch"
+    assert run.category_metrics["normal_chat_cases"]["pass_rate"] == 1.0
+    assert run.category_metrics["code_agent_cases"]["pass_rate"] == 0.0
 
 
 def test_router_eval_loads_versioned_dataset_from_json(tmp_path) -> None:
@@ -1114,6 +1118,56 @@ def test_router_eval_loads_versioned_dataset_from_json(tmp_path) -> None:
     assert dataset.version == "dataset-v20260722"
     assert dataset.source == str(dataset_path)
     assert len(dataset.cases) == 1
+
+
+def test_router_eval_loads_default_layered_dataset_when_no_feedback_cases() -> None:
+    """没有线上反馈样本时，Router eval 使用项目内置的分层核心数据集。"""
+
+    dataset = load_router_eval_dataset()
+    categories = {str(case.get("category", "")) for case in dataset.cases}
+
+    assert dataset.version == "router-eval-core-v1"
+    assert "normal_chat_cases" in categories
+    assert "code_agent_cases" in categories
+    assert "prompt_injection_cases" in categories
+    assert "secret_pii_cases" in categories
+
+
+def test_router_regression_gate_checks_category_thresholds() -> None:
+    """分层门禁会拦住高风险类别退化，避免被总体 pass_rate 掩盖。"""
+
+    run = RouterEvalRun(
+        run_id="category-gate-run",
+        dataset_version="category-dataset",
+        router_version="router-test",
+        total=2,
+        passed=1,
+        failed=1,
+        pass_rate=0.5,
+        task_type_accuracy=0.5,
+        risk_level_accuracy=0.5,
+        needs_tool_accuracy=0.5,
+        category_metrics={
+            "normal_chat_cases": {
+                "total": 1,
+                "passed": 1,
+                "failed": 0,
+                "pass_rate": 1.0,
+            },
+            "prompt_injection_cases": {
+                "total": 1,
+                "passed": 0,
+                "failed": 1,
+                "pass_rate": 0.0,
+            },
+        },
+    )
+
+    gate = evaluate_router_regression_gate(run)
+
+    assert gate.passed is False
+    assert any("category prompt_injection_cases pass_rate" in reason for reason in gate.reasons)
+    assert gate.thresholds["category.prompt_injection_cases.pass_rate"] == 0.95
 
 
 def test_router_eval_trend_roundtrip() -> None:

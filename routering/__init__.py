@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from .context import apply_context_policy, load_router_context
+from .eval_categories import (
+    DEFAULT_CATEGORY,
+    ROUTER_EVAL_CATEGORIES,
+    RouterEvalCategory,
+    is_strict_router_eval_category,
+    normalize_router_eval_category,
+)
 from .config_registry import (
     RouterConfigArtifact,
     RouterConfigRegistry,
@@ -84,6 +91,7 @@ from .sinks import (
 
 __all__ = [
     "RouterDecision",
+    "RouterEvalCategory",
     "RouterEvalDataset",
     "RouterEvalCase",
     "RouterEvalFailure",
@@ -116,6 +124,8 @@ __all__ = [
     "MultiStageRouterResult",
     "RuleDecision",
     "RuleMatch",
+    "DEFAULT_CATEGORY",
+    "ROUTER_EVAL_CATEGORIES",
     "apply_context_policy",
     "append_router_eval_case",
     "append_router_eval_trend",
@@ -137,6 +147,8 @@ __all__ = [
     "load_router_context",
     "load_router_config_registry",
     "load_router_rules",
+    "is_strict_router_eval_category",
+    "normalize_router_eval_category",
     "read_router_eval_cases",
     "read_router_eval_trends",
     "read_router_feedback",

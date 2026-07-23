@@ -174,6 +174,8 @@ def _feedback_event_to_eval_case(event: RouterFeedbackEvent) -> RouterEvalCase:
             f"decision_id={event.decision_id or 'none'}; "
             f"actual={event.actual_task_type}/{event.actual_risk_level}/{event.actual_needs_tool}"
         ),
+        category="regression_cases",
+        tags=("feedback", event.source),
         created_at=event.created_at,
     )
 

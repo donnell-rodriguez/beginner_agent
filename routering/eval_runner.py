@@ -34,6 +34,9 @@ from .sinks import ROUTER_DIR
 ROUTER_EVAL_TRENDS_FILE = ROUTER_DIR / "router_eval_trends.jsonl"
 DEFAULT_ROUTER_EVAL_DATASET_VERSION = "router-eval-local-v1"
 DEFAULT_ROUTER_VERSION = "router-local"
+DEFAULT_ROUTER_EVAL_DATASET_PATH = (
+    Path(__file__).resolve().parents[1] / "router_eval_datasets" / "router_eval_core.json"
+)
 
 
 RouterPredictFn = Callable[[str], RouterDecision]
@@ -62,6 +65,8 @@ def load_router_eval_dataset(path: str | Path | None = None) -> RouterEvalDatase
         from .observability import read_router_eval_cases
 
         cases = tuple(read_router_eval_cases())
+        if not cases and DEFAULT_ROUTER_EVAL_DATASET_PATH.exists():
+            return load_router_eval_dataset(DEFAULT_ROUTER_EVAL_DATASET_PATH)
         return RouterEvalDataset(
             version=os.getenv(
                 "BEGINNER_AGENT_ROUTER_EVAL_DATASET_VERSION",
@@ -145,6 +150,7 @@ def run_router_eval(
         task_type_accuracy=float(summary["task_type_accuracy"]),
         risk_level_accuracy=float(summary["risk_level_accuracy"]),
         needs_tool_accuracy=float(summary["needs_tool_accuracy"]),
+        category_metrics=dict(summary["category_metrics"]),
         failures=tuple(failures),
     )
 
@@ -185,6 +191,8 @@ def append_router_feedback(record: RouterFeedbackRecord) -> RouterEvalCase:
         expected_risk_level=record.expected_risk_level,
         expected_needs_tool=record.expected_needs_tool,
         reason=f"{record.source}: {record.reason}",
+        category="regression_cases",
+        tags=("feedback", record.source),
         created_at=record.created_at,
     )
     append_router_eval_case(case)

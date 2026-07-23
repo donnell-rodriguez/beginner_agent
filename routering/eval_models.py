@@ -71,6 +71,15 @@ class RouterEvalRun:
     task_type_accuracy: float
     risk_level_accuracy: float
     needs_tool_accuracy: float
+    # 中文注释：
+    # category_metrics 按样本分层统计指标。
+    #
+    # 例子：
+    #   normal_chat_cases      -> 普通聊天是否还稳定。
+    #   prompt_injection_cases -> 提示词注入是否被正确识别为高风险。
+    #
+    # 这样改 Router 时，不只看总体准确率，还能知道是哪一类能力退化。
+    category_metrics: dict[str, dict[str, Any]] = field(default_factory=dict)
     failures: tuple[RouterEvalFailure, ...] = field(default_factory=tuple)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -86,6 +95,7 @@ class RouterEvalRun:
             "task_type_accuracy": self.task_type_accuracy,
             "risk_level_accuracy": self.risk_level_accuracy,
             "needs_tool_accuracy": self.needs_tool_accuracy,
+            "category_metrics": self.category_metrics,
             "failures": [failure.as_dict() for failure in self.failures],
             "created_at": self.created_at,
         }
@@ -122,6 +132,11 @@ def router_eval_run_from_dict(data: dict[str, Any]) -> RouterEvalRun:
         task_type_accuracy=float(data.get("task_type_accuracy", 0.0)),
         risk_level_accuracy=float(data.get("risk_level_accuracy", 0.0)),
         needs_tool_accuracy=float(data.get("needs_tool_accuracy", 0.0)),
+        category_metrics={
+            str(key): dict(value)
+            for key, value in dict(data.get("category_metrics", {})).items()
+            if isinstance(value, dict)
+        },
         failures=failures,
         created_at=str(data.get("created_at", "")),
     )

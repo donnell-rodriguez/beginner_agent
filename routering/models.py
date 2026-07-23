@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..state import RiskLevel, TaskType
+from .eval_categories import DEFAULT_CATEGORY
 
 
 # 中文注释：
@@ -385,8 +386,8 @@ class RouterEvalCase:
 
     # 中文注释：
     # category 用于把 eval dataset 分层。
-    # 例如 normal_chat / code_agent / high_risk / prompt_injection / secret_pii。
-    category: str = "general"
+    # 例如 normal_chat_cases / code_agent_cases / high_risk_cases。
+    category: str = DEFAULT_CATEGORY
 
     # 中文注释：
     # tags 保存更细的样本标签，方便后续统计哪个能力退化。

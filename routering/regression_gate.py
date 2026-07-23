@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_project_env
+from .eval_categories import ROUTER_EVAL_CATEGORIES, is_strict_router_eval_category
 from .eval_models import RouterEvalRun, router_eval_run_from_dict
 
 
@@ -128,6 +129,18 @@ def evaluate_router_regression_gate(run: RouterEvalRun) -> RouterRegressionGateR
         reasons.append(
             f"needs_tool_accuracy {run.needs_tool_accuracy:.3f} < {thresholds['needs_tool_accuracy']:.3f}"
         )
+    category_thresholds = _category_pass_rate_thresholds()
+    for category, metrics in run.category_metrics.items():
+        total = int(metrics.get("total", 0))
+        if total <= 0:
+            continue
+        threshold = category_thresholds.get(category, category_thresholds["default"])
+        pass_rate = float(metrics.get("pass_rate", 0.0))
+        thresholds[f"category.{category}.pass_rate"] = threshold
+        if pass_rate < threshold:
+            reasons.append(
+                f"category {category} pass_rate {pass_rate:.3f} < {threshold:.3f}"
+            )
     return RouterRegressionGateResult(
         passed=not reasons,
         reasons=tuple(reasons),
@@ -172,6 +185,26 @@ def evaluate_router_release_gate(
                     f"{metric} drop {drop:.3f} > {allowed_drop:.3f} "
                     f"(baseline={baseline_value:.3f}, current={current_value:.3f})"
                 )
+        category_drop_threshold = _float_env(
+            "BEGINNER_AGENT_ROUTER_GATE_MAX_CATEGORY_PASS_RATE_DROP",
+            0.05,
+        )
+        for category, baseline_metrics in baseline.run.category_metrics.items():
+            if category not in run.category_metrics:
+                continue
+            baseline_total = int(baseline_metrics.get("total", 0))
+            current_total = int(run.category_metrics[category].get("total", 0))
+            if baseline_total <= 0 or current_total <= 0:
+                continue
+            baseline_value = float(baseline_metrics.get("pass_rate", 0.0))
+            current_value = float(run.category_metrics[category].get("pass_rate", 0.0))
+            drop = baseline_value - current_value
+            if drop > category_drop_threshold:
+                reasons.append(
+                    f"category {category} pass_rate drop {drop:.3f} > "
+                    f"{category_drop_threshold:.3f} "
+                    f"(baseline={baseline_value:.3f}, current={current_value:.3f})"
+                )
     config_changed = (
         baseline.config_fingerprint.fingerprint != selected_fingerprint.fingerprint
         if baseline and baseline.config_fingerprint
@@ -188,6 +221,10 @@ def evaluate_router_release_gate(
         thresholds={
             **{f"min_{key}": value for key, value in regression.thresholds.items()},
             **{f"max_{key}_drop": value for key, value in drop_thresholds.items()},
+            "max_category_pass_rate_drop": _float_env(
+                "BEGINNER_AGENT_ROUTER_GATE_MAX_CATEGORY_PASS_RATE_DROP",
+                0.05,
+            ),
         },
     )
 
@@ -314,6 +351,24 @@ def _drop_thresholds() -> dict[str, float]:
             "BEGINNER_AGENT_ROUTER_GATE_MAX_NEEDS_TOOL_ACCURACY_DROP", 0.02
         ),
     }
+
+
+def _category_pass_rate_thresholds() -> dict[str, float]:
+    """读取 Router eval 分层门禁阈值。
+
+    中文注释：
+    大厂 Router eval 不会只看总体 pass_rate。
+    高风险、安全、隐私类样本必须更严格，因为这些错一次就可能造成真实风险。
+    """
+
+    thresholds = {
+        "default": _float_env("BEGINNER_AGENT_ROUTER_GATE_MIN_CATEGORY_PASS_RATE", 0.80)
+    }
+    for category in ROUTER_EVAL_CATEGORIES:
+        env_name = f"BEGINNER_AGENT_ROUTER_GATE_MIN_{category.upper()}_PASS_RATE"
+        default = 0.95 if is_strict_router_eval_category(category) else thresholds["default"]
+        thresholds[category] = _float_env(env_name, default)
+    return thresholds
 
 
 def _metric_value(run: RouterEvalRun, metric: str) -> float:
