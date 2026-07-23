@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .checkpoint_models import CheckpointRecoveryContract, CheckpointReport
+from .checkpoint_observability import append_checkpoint_event
 from .checkpointing import check_checkpoint_health, checkpoint_backend_config
 from .state import State
 
@@ -51,6 +52,7 @@ def postgres_checkpoint_node(state: State) -> dict[str, Any]:
         "requested_backend": config.requested_backend,
         "status": health.status,
         "persistent": health.persistent,
+        "setup_status": health.setup_status,
         "resume_supported": recovery_contract.resume_supported,
         "warnings": health.warnings,
         "errors": health.errors,
@@ -65,6 +67,7 @@ def postgres_checkpoint_node(state: State) -> dict[str, Any]:
         observability_event=observability_event,
         reason=_checkpoint_reason(health.status, config.effective_backend),
     ).model_dump(mode="json")
+    append_checkpoint_event(report["observability_event"])
     return {
         "checkpoint_report": report,
         "messages": [

@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.checkpoint.memory import MemorySaver
 
 from beginner_agent.checkpoint_node import postgres_checkpoint_node
+import beginner_agent.checkpoint_observability as checkpoint_observability
 from beginner_agent.checkpointing import build_checkpointer, checkpoint_backend_config
 from beginner_agent.state_factory import create_initial_state
 
@@ -95,3 +96,89 @@ def test_checkpoint_node_reports_postgres_when_configured_without_live_healthche
     assert report["recovery_contract"]["checkpoint_namespace"] == "unit-test"
     assert report["recovery_contract"]["resume_supported"] is True
     assert report["observability_event"]["event_type"] == "checkpoint_health"
+
+
+def test_checkpoint_observability_writes_jsonl_event(monkeypatch, tmp_path) -> None:
+    """checkpoint_node 要把事件写入独立 checkpoint_events.jsonl。"""
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "memory")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_OBSERVABILITY_SINK", "jsonl")
+    monkeypatch.setattr(checkpoint_observability, "CHECKPOINT_DIR", tmp_path)
+    monkeypatch.setattr(
+        checkpoint_observability,
+        "CHECKPOINT_EVENTS_FILE",
+        tmp_path / "checkpoint_events.jsonl",
+    )
+
+    postgres_checkpoint_node(create_initial_state("hello"))
+    events = checkpoint_observability.read_checkpoint_events()
+
+    assert events[-1]["event_type"] == "checkpoint_health"
+    assert events[-1]["backend"] == "memory"
+    assert events[-1]["status"] == "warning"
+    assert events[-1]["alerts"]
+
+
+def test_checkpoint_observability_kafka_spool_sink(monkeypatch, tmp_path) -> None:
+    """kafka_spool sink 要写入 spool 文件，方便后续 producer 转发。"""
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "postgres")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_ALLOW_MEMORY_FALLBACK", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_OBSERVABILITY_SINK", "kafka_spool")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_KAFKA_TOPIC", "test.checkpoint")
+    monkeypatch.setattr(checkpoint_observability, "CHECKPOINT_DIR", tmp_path)
+    monkeypatch.setattr(
+        checkpoint_observability,
+        "CHECKPOINT_KAFKA_SPOOL_FILE",
+        tmp_path / "checkpoint_kafka_spool.jsonl",
+    )
+
+    postgres_checkpoint_node(create_initial_state("hello"))
+    spool = checkpoint_observability.CHECKPOINT_KAFKA_SPOOL_FILE.read_text(encoding="utf-8")
+
+    assert '"_sink": "kafka_spool"' in spool
+    assert '"_topic": "test.checkpoint"' in spool
+    assert "checkpoint_fallback_to_memory" in spool
+
+
+def test_checkpoint_observability_null_sink_does_not_write(monkeypatch, tmp_path) -> None:
+    """null sink 不写文件，适合测试或隐私场景。"""
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "memory")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_OBSERVABILITY_SINK", "null")
+    monkeypatch.setattr(checkpoint_observability, "CHECKPOINT_DIR", tmp_path)
+    monkeypatch.setattr(
+        checkpoint_observability,
+        "CHECKPOINT_EVENTS_FILE",
+        tmp_path / "checkpoint_events.jsonl",
+    )
+
+    postgres_checkpoint_node(create_initial_state("hello"))
+
+    assert not checkpoint_observability.CHECKPOINT_EVENTS_FILE.exists()
+
+
+def test_checkpoint_observability_failure_does_not_break_node(monkeypatch) -> None:
+    """checkpoint observability 写入失败不能拖垮 checkpoint node 主路径。"""
+
+    class FailingSink:
+        def append_event(self, event):
+            raise OSError("disk full")
+
+        def read_events(self, limit=None):
+            return []
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "memory")
+    monkeypatch.setattr(
+        checkpoint_observability,
+        "resolve_checkpoint_observability_sink",
+        lambda: FailingSink(),
+    )
+
+    result = postgres_checkpoint_node(create_initial_state("hello"))
+
+    assert result["checkpoint_report"]["backend"] == "memory"
