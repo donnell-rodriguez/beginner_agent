@@ -28,6 +28,7 @@ from .nodes import (
     route_after_observability_reporter,
     route_after_plan_validator,
     route_after_planner,
+    route_after_postgres_checkpoint,
     route_after_policy,
     route_after_recovery_planner,
     route_after_sandbox_runner,
@@ -182,8 +183,17 @@ def build_graph():
     builder.add_edge("memory_retriever", "postgres_checkpoint")
 
     # Postgres Checkpoint
-    # 真正 checkpoint 是 runtime 层；这个节点只把后端信息写进 State。
-    builder.add_edge("postgres_checkpoint", "scheduler")
+    # 真正 checkpoint 是 runtime 层；这个节点把后端信息写进 State。
+    # 如果发生 memory fallback 且当前任务风险不允许降级，
+    # 就直接进入 code_agent_summarize，避免高风险任务在不可恢复状态下继续执行。
+    builder.add_conditional_edges(
+        "postgres_checkpoint",
+        route_after_postgres_checkpoint,
+        {
+            "schedule": "scheduler",
+            "finish": "code_agent_summarize",
+        },
+    )
 
     # 简单任务完成后进入简单汇总。
     builder.add_edge("search", "simple_summarize")

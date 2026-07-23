@@ -11,6 +11,30 @@ CheckpointPersistenceGuarantee = Literal["none", "process", "durable"]
 CheckpointFallbackPolicy = Literal["allow_memory", "fail_fast"]
 
 
+class CheckpointFallbackRiskDecision(BaseModel):
+    """运行时 fallback 风险决策。
+
+    中文注释：
+    env 只能说明“技术上允不允许 fallback”。
+    但生产级 agent 还要结合当前任务风险判断：
+
+    - 高风险代码修改不能悄悄 fallback 到 memory。
+    - 长任务不能悄悄 fallback 到 memory。
+    - 需要人工审批的任务不能悄悄 fallback 到 memory。
+
+    所以这个模型记录“本轮任务是否允许使用 memory fallback”以及原因。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: bool
+    requires_persistence: bool
+    reason: str
+    risk_factors: list[str] = Field(default_factory=list)
+    policy_source: str = "checkpoint_policy.py"
+    long_task_step_threshold: int = 8
+
+
 class CheckpointBackendConfig(BaseModel):
     """Checkpoint 后端配置。
 
@@ -121,5 +145,6 @@ class CheckpointReport(BaseModel):
     state_keys_tracked_by_graph: bool = True
     health: CheckpointHealth
     recovery_contract: CheckpointRecoveryContract
+    fallback_risk_decision: CheckpointFallbackRiskDecision
     observability_event: dict[str, Any]
     reason: str

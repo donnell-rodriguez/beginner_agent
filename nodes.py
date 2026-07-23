@@ -7,7 +7,7 @@ from __future__ import annotations
 from .approval import approval_interrupt_node, route_after_approval_interrupt
 from .artifacts import artifact_collector_node
 from .async_jobs import async_job_waiter_node
-from .checkpoint_node import postgres_checkpoint_node
+from .checkpoint_node import postgres_checkpoint_node, route_after_postgres_checkpoint
 from .evaluator import (
     evaluator_verifier_node,
     route_after_evaluator,
@@ -61,6 +61,7 @@ __all__ = [
     "route_after_observability_reporter",
     "route_after_plan_validator",
     "route_after_planner",
+    "route_after_postgres_checkpoint",
     "route_after_policy",
     "route_after_recovery_planner",
     "route_after_sandbox_runner",

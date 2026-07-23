@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from beginner_agent.checkpoint_node import postgres_checkpoint_node
+from beginner_agent.checkpoint_node import postgres_checkpoint_node, route_after_postgres_checkpoint
 import beginner_agent.checkpoint_observability as checkpoint_observability
 from beginner_agent.checkpointing import build_checkpointer, checkpoint_backend_config
 from beginner_agent.state_factory import create_initial_state
@@ -18,6 +18,10 @@ def _clear_checkpoint_env(monkeypatch) -> None:
         "BEGINNER_AGENT_CHECKPOINT_REQUIRE_THREAD_ID",
         "BEGINNER_AGENT_CHECKPOINT_HEALTHCHECK_ENABLED",
         "BEGINNER_AGENT_CHECKPOINT_NAMESPACE",
+        "BEGINNER_AGENT_CHECKPOINT_REQUIRE_PERSISTENCE_FOR_AGENT",
+        "BEGINNER_AGENT_CHECKPOINT_REQUIRE_PERSISTENCE_FOR_APPROVAL",
+        "BEGINNER_AGENT_CHECKPOINT_REQUIRE_PERSISTENCE_FOR_WRITE_TOOLS",
+        "BEGINNER_AGENT_CHECKPOINT_LONG_TASK_STEP_THRESHOLD",
         "DATABASE_URL",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -61,10 +65,13 @@ def test_checkpoint_can_fallback_to_memory_when_explicitly_allowed(monkeypatch) 
     _clear_checkpoint_env(monkeypatch)
     monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "postgres")
     monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_ALLOW_MEMORY_FALLBACK", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_LONG_TASK_STEP_THRESHOLD", "30")
 
     config = checkpoint_backend_config()
     checkpointer = build_checkpointer()
-    result = postgres_checkpoint_node(create_initial_state("hello"))
+    state = create_initial_state("hello")
+    state["max_steps"] = 4
+    result = postgres_checkpoint_node(state)
     report = result["checkpoint_report"]
 
     assert config.requested_backend == "postgres"
@@ -73,6 +80,70 @@ def test_checkpoint_can_fallback_to_memory_when_explicitly_allowed(monkeypatch) 
     assert report["health"]["status"] == "degraded"
     assert report["requested_backend"] == "postgres"
     assert report["backend"] == "memory"
+    assert report["fallback_risk_decision"]["allowed"] is True
+
+
+def test_checkpoint_fallback_blocks_high_risk_agent_task(monkeypatch) -> None:
+    """高风险复杂 agent 任务不能在 memory fallback 下继续执行。"""
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "postgres")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_ALLOW_MEMORY_FALLBACK", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_HEALTHCHECK_ENABLED", "false")
+
+    state = create_initial_state("请修改代码并运行测试")
+    state["task_type"] = "agent"
+    state["risk_level"] = "high"
+    state["tool_name"] = "apply_patch"
+
+    result = postgres_checkpoint_node(state)
+    report = result["checkpoint_report"]
+
+    assert report["backend"] == "memory"
+    assert report["health"]["status"] == "blocked"
+    assert report["fallback_risk_decision"]["allowed"] is False
+    assert report["fallback_risk_decision"]["requires_persistence"] is True
+    assert "risk_level_high" in report["fallback_risk_decision"]["risk_factors"]
+    assert result["next_action"] == "finish"
+    assert result["done"] is True
+
+
+def test_checkpoint_fallback_blocks_long_task(monkeypatch) -> None:
+    """长任务即使风险不高，也不应该降级到不可恢复的 memory checkpoint。"""
+
+    _clear_checkpoint_env(monkeypatch)
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_BACKEND", "postgres")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_ALLOW_MEMORY_FALLBACK", "true")
+    monkeypatch.setenv("BEGINNER_AGENT_CHECKPOINT_LONG_TASK_STEP_THRESHOLD", "5")
+
+    state = create_initial_state("梳理整个项目")
+    state["task_type"] = "chat"
+    state["risk_level"] = "low"
+    state["max_steps"] = 8
+
+    result = postgres_checkpoint_node(state)
+    report = result["checkpoint_report"]
+
+    assert report["health"]["status"] == "blocked"
+    assert "long_task_max_steps_8" in report["fallback_risk_decision"]["risk_factors"]
+
+
+def test_route_after_postgres_checkpoint_finishes_when_blocked() -> None:
+    """checkpoint blocked 时，graph 要进入最终 summary，而不是继续 scheduler。"""
+
+    state = create_initial_state("hello")
+    state["checkpoint_report"] = {"health": {"status": "blocked"}}
+
+    assert route_after_postgres_checkpoint(state) == "finish"
+
+
+def test_route_after_postgres_checkpoint_schedules_when_healthy() -> None:
+    """checkpoint 没有阻断时，graph 继续进入 Scheduler。"""
+
+    state = create_initial_state("hello")
+    state["checkpoint_report"] = {"health": {"status": "healthy"}}
+
+    assert route_after_postgres_checkpoint(state) == "schedule"
 
 
 def test_checkpoint_node_reports_postgres_when_configured_without_live_healthcheck(
