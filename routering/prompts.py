@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_project_env
+from .config_registry import resolve_router_config_artifact
 
 
 # 中文注释：
@@ -83,6 +84,25 @@ def select_router_prompt(text: str) -> RouterPromptSpec:
     """
 
     load_project_env()
+    registry_artifact = resolve_router_config_artifact("prompt", text=text)
+    if registry_artifact is not None and (registry_path := registry_artifact.resolved_path()):
+        prompt = _load_prompt_file(
+            registry_path,
+            text=text,
+            source_prefix=f"registry:{registry_artifact.artifact_id}:",
+        )
+        if prompt is not None:
+            return RouterPromptSpec(
+                version=registry_artifact.version or prompt.version,
+                template=prompt.template,
+                experiment_group=registry_artifact.experiment_group,
+                source=prompt.source,
+                rollout_percent=registry_artifact.rollout_percent,
+                temperature=prompt.temperature,
+                max_tokens=prompt.max_tokens,
+                rollback_from=registry_artifact.rollback_from,
+            )
+
     rollback_path = os.getenv("BEGINNER_AGENT_ROUTER_PROMPT_ROLLBACK_PATH", "").strip()
     if rollback_path:
         prompt = _load_prompt_file(

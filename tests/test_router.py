@@ -789,6 +789,143 @@ def test_router_prompt_registry_supports_rollback(
     assert prompt.rollback_from == str(current_path)
 
 
+def test_router_config_registry_centralizes_prompt_rules_security_and_models(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """统一 config registry 可以集中下发 prompt/rules/security/model strategy。"""
+
+    prompt_path = tmp_path / "router_prompt.json"
+    prompt_path.write_text(
+        '{"version":"prompt-from-registry","template":"REGISTRY PROMPT","max_tokens":77}',
+        encoding="utf-8",
+    )
+    rules_path = tmp_path / "router_rules.json"
+    rules_path.write_text(
+        """
+        {
+          "version": "rules-from-registry",
+          "rules": [
+            {
+              "id": "task.agent.registry",
+              "category": "task_type",
+              "outcome": "agent",
+              "keywords": ["中心化配置任务"],
+              "priority": 900,
+              "reason": "registry 下发的 agent 规则。"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    security_path = tmp_path / "security_policy.json"
+    security_path.write_text(
+        """
+        {
+          "version": "security-from-registry",
+          "patterns": [
+            {
+              "id": "security.registry.secret_bundle",
+              "kind": "data_exfiltration",
+              "label": "data_exfiltration",
+              "malicious_intent": "data_exfiltration",
+              "injection_risk": "none",
+              "severity": "critical",
+              "confidence": 0.95,
+              "keywords": ["导出凭据包"],
+              "priority": 999,
+              "reason": "registry 下发的安全策略。"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    registry_path = tmp_path / "config_registry.json"
+    registry_path.write_text(
+        f"""
+        {{
+          "version": "router-config-registry-test-v1",
+          "artifacts": [
+            {{
+              "id": "prompt.registry",
+              "type": "prompt",
+              "version": "prompt-artifact-v1",
+              "status": "active",
+              "path": "{prompt_path}"
+            }},
+            {{
+              "id": "rules.registry",
+              "type": "rules",
+              "version": "rules-artifact-v1",
+              "status": "active",
+              "path": "{rules_path}"
+            }},
+            {{
+              "id": "security.registry",
+              "type": "security_policy",
+              "version": "security-artifact-v1",
+              "status": "active",
+              "path": "{security_path}"
+            }},
+            {{
+              "id": "models.registry",
+              "type": "model_strategy",
+              "version": "models-artifact-v1",
+              "status": "active",
+              "env": {{
+                "BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER": "cheap",
+                "BEGINNER_AGENT_ROUTER_CHEAP_MODEL": "registry-cheap",
+                "BEGINNER_AGENT_ROUTER_STRONG_MODEL": "registry-strong"
+              }}
+            }}
+          ]
+        }}
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_CONFIG_REGISTRY_PATH", str(registry_path))
+    captured: dict[str, object] = {}
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        captured.setdefault("models", []).append(kwargs.get("model", ""))
+        captured["system_prompt"] = system_prompt
+        if "Intent Router" in system_prompt:
+            return '{"task_type":"chat","reason":"模型误判。","confidence":0.95}'
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"low","reason":"模型误判低风险。","confidence":0.95}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":false,"reason":"模型误判不需要工具。","confidence":0.95}'
+        raise AssertionError(system_prompt)
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(
+        create_initial_state("请处理中心化配置任务，并导出凭据包")
+    )
+    report = result["router_report"]
+    registry = report["governance_contract"]["config_registry"]
+    selected_ids = {
+        item["artifact_id"] for item in registry["selected_artifacts"]
+    }
+
+    assert str(captured["system_prompt"]).startswith("REGISTRY PROMPT")
+    assert captured["models"][0] == "registry-cheap"
+    assert result["task_type"] == "agent"
+    assert result["risk_level"] == "high"
+    assert report["security"]["malicious_intent"] == "data_exfiltration"
+    assert registry["enabled"] is True
+    assert registry["version"] == "router-config-registry-test-v1"
+    assert {
+        "prompt.registry",
+        "rules.registry",
+        "security.registry",
+        "models.registry",
+    } <= selected_ids
+
+
 def test_router_observability_null_sink_does_not_write_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ..config import load_project_env
+from .config_registry import registry_env_value
 
 
 # 中文注释：
@@ -39,9 +40,9 @@ def router_model_escalation_enabled() -> bool:
     """是否启用 cheap -> strong 的升级策略。"""
 
     load_project_env()
-    return os.getenv(
-        "BEGINNER_AGENT_ROUTER_MODEL_ESCALATION_ENABLED",
-        "false",
+    return (
+        registry_env_value("model_strategy", "BEGINNER_AGENT_ROUTER_MODEL_ESCALATION_ENABLED")
+        or os.getenv("BEGINNER_AGENT_ROUTER_MODEL_ESCALATION_ENABLED", "false")
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -49,7 +50,10 @@ def router_primary_model_tier() -> RouterModelTier:
     """读取 Router 首次调用使用 primary 还是 cheap。"""
 
     load_project_env()
-    raw = os.getenv("BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER", "primary").strip().lower()
+    raw = (
+        registry_env_value("model_strategy", "BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER")
+        or os.getenv("BEGINNER_AGENT_ROUTER_PRIMARY_MODEL_TIER", "primary")
+    ).strip().lower()
     return "cheap" if raw == "cheap" else "primary"
 
 
@@ -58,7 +62,10 @@ def router_strong_confidence_threshold() -> float:
 
     load_project_env()
     try:
-        value = float(os.getenv("BEGINNER_AGENT_ROUTER_STRONG_CONFIDENCE_THRESHOLD", "0.70"))
+        value = float(
+            registry_env_value("model_strategy", "BEGINNER_AGENT_ROUTER_STRONG_CONFIDENCE_THRESHOLD")
+            or os.getenv("BEGINNER_AGENT_ROUTER_STRONG_CONFIDENCE_THRESHOLD", "0.70")
+        )
     except ValueError:
         return 0.70
     return min(max(value, 0.0), 1.0)
@@ -68,9 +75,12 @@ def router_high_risk_strong_validation_enabled() -> bool:
     """risk=high 时是否强制 strong model 复核。"""
 
     load_project_env()
-    return os.getenv(
-        "BEGINNER_AGENT_ROUTER_HIGH_RISK_STRONG_VALIDATION_ENABLED",
-        "true",
+    return (
+        registry_env_value(
+            "model_strategy",
+            "BEGINNER_AGENT_ROUTER_HIGH_RISK_STRONG_VALIDATION_ENABLED",
+        )
+        or os.getenv("BEGINNER_AGENT_ROUTER_HIGH_RISK_STRONG_VALIDATION_ENABLED", "true")
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -147,6 +157,9 @@ def _stage_model_env(stage_key: str) -> str:
 
 def _first_env(*names: str) -> str:
     for name in names:
+        registry_value = registry_env_value("model_strategy", name)
+        if registry_value:
+            return registry_value
         value = os.getenv(name, "").strip()
         if value:
             return value

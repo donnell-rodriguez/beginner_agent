@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import load_project_env
+from .config_registry import router_config_registry_snapshot
 from .models import RouterContext
 from .model_strategy import select_router_stage_model
 from .prompts import RouterPromptSpec
@@ -63,6 +64,7 @@ class RouterGovernanceContract:
     user_id: str
     stage_budgets: tuple[RouterStageBudget, ...]
     max_total_latency_ms: int
+    config_registry: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +82,7 @@ class RouterGovernanceContract:
             "user_id": self.user_id,
             "stage_budgets": [budget.as_dict() for budget in self.stage_budgets],
             "max_total_latency_ms": self.max_total_latency_ms,
+            "config_registry": self.config_registry,
         }
 
 
@@ -89,6 +92,7 @@ def load_router_governance_contract(
     rules: RouterRuleSet,
     security_policy: SecurityPolicy,
     context: RouterContext,
+    text: str = "",
 ) -> RouterGovernanceContract:
     """组装本次 Router 决策的治理合同。"""
 
@@ -145,6 +149,7 @@ def load_router_governance_contract(
             ),
         ),
         max_total_latency_ms=_env_int("BEGINNER_AGENT_ROUTER_MAX_TOTAL_LATENCY_MS", 3000),
+        config_registry=router_config_registry_snapshot(text=text),
     )
 
 

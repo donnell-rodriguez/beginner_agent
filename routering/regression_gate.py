@@ -197,6 +197,7 @@ def current_router_config_fingerprint() -> RouterConfigFingerprint:
 
     load_project_env()
     file_env_names = (
+        "BEGINNER_AGENT_ROUTER_CONFIG_REGISTRY_PATH",
         "BEGINNER_AGENT_ROUTER_PROMPT_PATH",
         "BEGINNER_AGENT_ROUTER_PROMPT_ROLLBACK_PATH",
         "BEGINNER_AGENT_ROUTER_RULES_PATH",

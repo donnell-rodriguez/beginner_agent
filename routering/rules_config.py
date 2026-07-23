@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..config import load_project_env
+from .config_registry import resolve_router_config_artifact
 from .rule_models import RuleCategory, RouterRule, RouterRuleSet
 from .rules_builtin import (
     DEFAULT_AGENT_KEYWORDS,
@@ -26,6 +27,19 @@ def load_router_rules() -> RouterRuleSet:
     """加载 Router 规则。"""
 
     load_project_env()
+    registry_artifact = resolve_router_config_artifact("rules")
+    if registry_artifact is not None and (registry_path := registry_artifact.resolved_path()):
+        loaded = _load_rules_from_file(
+            registry_path,
+            source=f"registry:{registry_artifact.artifact_id}:{registry_path}",
+        )
+        if loaded is not None:
+            return RouterRuleSet(
+                version=registry_artifact.version or loaded.version,
+                source=loaded.source,
+                rules=loaded.rules,
+                rollback_from=registry_artifact.rollback_from,
+            )
 
     rollback_path = os.getenv("BEGINNER_AGENT_ROUTER_RULES_ROLLBACK_PATH", "").strip()
     if rollback_path:

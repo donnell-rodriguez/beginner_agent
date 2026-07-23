@@ -285,6 +285,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
         rules=rules,
         security_policy=security_policy,
         context=context,
+        text=text,
     )
     sanitized_input = sanitize_router_input_for_prompt(text)
 

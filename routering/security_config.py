@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..config import load_project_env
+from .config_registry import resolve_router_config_artifact
 from .models import InjectionRisk, MaliciousIntent
 from .security_models import (
     SecurityFindingKind,
@@ -24,6 +25,25 @@ def load_security_policy() -> SecurityPolicy:
     """加载 Router 安全策略。"""
 
     load_project_env()
+    registry_artifact = resolve_router_config_artifact("security_policy")
+    if registry_artifact is not None and (registry_path := registry_artifact.resolved_path()):
+        loaded = _load_security_policy_file(registry_path)
+        if loaded is not None:
+            policy = SecurityPolicy(
+                version=registry_artifact.version or loaded.version,
+                source=f"registry:{registry_artifact.artifact_id}:{registry_path}",
+                patterns=loaded.patterns,
+            )
+            history = _load_historical_abuse_keywords()
+            if history:
+                return SecurityPolicy(
+                    version=policy.version,
+                    source=policy.source,
+                    patterns=policy.patterns,
+                    historical_abuse_keywords=history,
+                )
+            return policy
+
     path = os.getenv("BEGINNER_AGENT_ROUTER_SECURITY_POLICY_PATH", "").strip()
     policy = SecurityPolicy()
     if path:

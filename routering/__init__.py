@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 from .context import apply_context_policy, load_router_context
+from .config_registry import (
+    RouterConfigArtifact,
+    RouterConfigRegistry,
+    load_router_config_registry,
+    registry_env_value,
+    resolve_router_config_artifact,
+    router_config_registry_snapshot,
+)
 from .conflicts import RouterConflict, detect_router_conflicts
 from .models import RouterDecision, RouterEvalCase, RouterEvent, RouterSecuritySignal
 from .nodes import route_by_task, router_classifier_node
@@ -85,6 +93,8 @@ __all__ = [
     "RouterFeedbackEvent",
     "RouterFeedbackResult",
     "RouterConfigFingerprint",
+    "RouterConfigArtifact",
+    "RouterConfigRegistry",
     "RouterEvalBaseline",
     "RouterObservabilitySink",
     "RouterPromptSpec",
@@ -125,12 +135,15 @@ __all__ = [
     "load_router_eval_dataset",
     "load_router_eval_baseline",
     "load_router_context",
+    "load_router_config_registry",
     "load_router_rules",
     "read_router_eval_cases",
     "read_router_eval_trends",
     "read_router_feedback",
     "read_router_metrics",
     "read_router_review_queue",
+    "registry_env_value",
+    "resolve_router_config_artifact",
     "record_router_correction",
     "write_router_eval_baseline",
     "run_router_eval",
@@ -144,6 +157,7 @@ __all__ = [
     "router_model_escalation_enabled",
     "router_primary_model_tier",
     "router_strong_confidence_threshold",
+    "router_config_registry_snapshot",
     "JsonlRouterObservabilitySink",
     "KafkaSpoolRouterObservabilitySink",
     "NullRouterObservabilitySink",
