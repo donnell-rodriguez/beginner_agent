@@ -10,7 +10,7 @@ from ..failure_policy import RouterFailurePolicy
 from ..governance import router_stage_model
 from ..prompts import RouterPromptSpec
 from .models import ROUTER_DECISION_FIELDS, RepairInfo, StageModelT
-from .runtime import stage_max_tokens
+from .runtime import stage_max_tokens, stage_timeout_seconds
 
 
 # 中文注释：
@@ -100,6 +100,10 @@ def _call_repair_router(
     kwargs = {
         "temperature": 0,
         "max_tokens": stage_max_tokens(max_tokens_env, prompt.max_tokens),
+        # 中文注释：
+        # repair 也是 Router 主路径的一部分，所以也必须有硬超时。
+        # 否则“修复坏 JSON”这个补救动作反而可能把入口节点卡住。
+        "timeout_seconds": stage_timeout_seconds("BEGINNER_AGENT_ROUTER_REPAIR_TIMEOUT_MS"),
     }
     if model:
         kwargs["model"] = model

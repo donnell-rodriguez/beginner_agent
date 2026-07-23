@@ -173,6 +173,7 @@ def _run_intent_router(
                 '{"task_type":"chat|search|write|agent","reason":"一句话原因","confidence":0.0-1.0}'
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_INTENT_MAX_TOKENS",
+            timeout_ms_env="BEGINNER_AGENT_ROUTER_INTENT_TIMEOUT_MS",
         )
         parsed, repair = parse_stage_model_with_repair(
             response,
@@ -199,7 +200,14 @@ def _run_intent_router(
             raw_invalid_response=repair.raw_invalid_response,
             validation_error_type=repair.validation_error_type,
         )
-    except (RuntimeError, ValueError, json.JSONDecodeError, AttributeError, ValidationError) as exc:
+    except (
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+        json.JSONDecodeError,
+        AttributeError,
+        ValidationError,
+    ) as exc:
         return fallback_intent(text, rules, f"{type(exc).__name__}: {exc}", "")
 
 
@@ -225,6 +233,7 @@ def _run_risk_router(
                 '{"risk_level":"low|medium|high","reason":"一句话原因","confidence":0.0-1.0}'
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_RISK_MAX_TOKENS",
+            timeout_ms_env="BEGINNER_AGENT_ROUTER_RISK_TIMEOUT_MS",
         )
         parsed, repair = parse_stage_model_with_repair(
             response,
@@ -251,7 +260,14 @@ def _run_risk_router(
             raw_invalid_response=repair.raw_invalid_response,
             validation_error_type=repair.validation_error_type,
         )
-    except (RuntimeError, ValueError, json.JSONDecodeError, AttributeError, ValidationError) as exc:
+    except (
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+        json.JSONDecodeError,
+        AttributeError,
+        ValidationError,
+    ) as exc:
         return fallback_risk(
             text,
             rules,
@@ -284,6 +300,7 @@ def _run_tool_needs_router(
                 '{"needs_tool":true,"reason":"一句话原因","confidence":0.0-1.0}'
             ),
             max_tokens_env="BEGINNER_AGENT_ROUTER_TOOL_NEEDS_MAX_TOKENS",
+            timeout_ms_env="BEGINNER_AGENT_ROUTER_TOOL_NEEDS_TIMEOUT_MS",
         )
         parsed, repair = parse_stage_model_with_repair(
             response,
@@ -310,7 +327,14 @@ def _run_tool_needs_router(
             raw_invalid_response=repair.raw_invalid_response,
             validation_error_type=repair.validation_error_type,
         )
-    except (RuntimeError, ValueError, json.JSONDecodeError, AttributeError, ValidationError) as exc:
+    except (
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+        json.JSONDecodeError,
+        AttributeError,
+        ValidationError,
+    ) as exc:
         return fallback_tool_needs(intent, f"{type(exc).__name__}: {exc}", "")
 
 

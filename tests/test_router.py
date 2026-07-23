@@ -1120,6 +1120,71 @@ def test_router_stage_model_can_be_configured_per_stage(
     assert {item["stage"]: item["model"] for item in budgets}["intent_router"] == "intent-model"
 
 
+def test_router_stage_timeouts_are_passed_to_llm_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """每个 Router 子阶段都要把 env 里的硬超时传给 LLM client。"""
+
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_INTENT_TIMEOUT_MS", "1200")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_RISK_TIMEOUT_MS", "2300")
+    monkeypatch.setenv("BEGINNER_AGENT_ROUTER_TOOL_NEEDS_TIMEOUT_MS", "3400")
+    stage_timeouts: dict[str, float] = {}
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        if "Intent Router" in system_prompt:
+            stage_timeouts["intent"] = kwargs["timeout_seconds"]
+            return '{"task_type":"chat","reason":"普通问答。","confidence":0.9}'
+        if "Risk Router" in system_prompt:
+            stage_timeouts["risk"] = kwargs["timeout_seconds"]
+            return '{"risk_level":"low","reason":"普通问答。","confidence":0.9}'
+        if "Tool Needs Router" in system_prompt:
+            stage_timeouts["tool"] = kwargs["timeout_seconds"]
+            return '{"needs_tool":false,"reason":"不需要工具。","confidence":0.9}'
+        raise AssertionError(system_prompt)
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+
+    assert result["task_type"] == "chat"
+    assert stage_timeouts == {
+        "intent": 1.2,
+        "risk": 2.3,
+        "tool": 3.4,
+    }
+
+
+def test_router_stage_timeout_falls_back_without_breaking_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """某个子 Router 超时时，只让该阶段 fallback，不拖垮整个 Router。"""
+
+    def fake_chat_completion(messages, **kwargs):
+        system_prompt = messages[0]["content"]
+        if "Intent Router" in system_prompt:
+            raise TimeoutError("intent router exceeded budget")
+        if "Risk Router" in system_prompt:
+            return '{"risk_level":"low","reason":"普通问答。","confidence":0.9}'
+        if "Tool Needs Router" in system_prompt:
+            return '{"needs_tool":false,"reason":"不需要工具。","confidence":0.9}'
+        raise AssertionError(system_prompt)
+
+    monkeypatch.setattr(router, "chat_completion", fake_chat_completion)
+
+    result = router.router_classifier_node(create_initial_state("你好"))
+    intent_audit = [
+        item
+        for item in result["router_report"]["failure_audit"]
+        if item["stage"] == "intent_router"
+    ][0]
+
+    assert result["task_type"] == "chat"
+    assert result["router_report"]["source"] == "fallback"
+    assert "TimeoutError" in intent_audit["fallback_reason"]
+    assert "intent router exceeded budget" in intent_audit["fallback_reason"]
+
+
 def test_router_regression_gate_marks_bad_eval_run_failed() -> None:
     """Router eval 门禁会根据阈值拒绝退化的 run。"""
 

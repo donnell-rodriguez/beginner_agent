@@ -21,6 +21,7 @@ def call_stage_router(
     stage_title: str,
     instruction: str,
     max_tokens_env: str,
+    timeout_ms_env: str,
 ) -> str:
     """调用某一个 Router 子阶段。"""
 
@@ -28,6 +29,11 @@ def call_stage_router(
     kwargs = {
         "temperature": prompt.temperature,
         "max_tokens": stage_max_tokens(max_tokens_env, prompt.max_tokens),
+        # 中文注释：
+        # Router 是入口节点，不能因为某个 LLM 阶段慢而拖住整个图。
+        # 这里把 .env 中的毫秒预算转成 urllib 需要的秒数，
+        # 然后传给 llm_client.chat_completion 做真正的硬超时。
+        "timeout_seconds": stage_timeout_seconds(timeout_ms_env),
     }
     if model:
         kwargs["model"] = model
@@ -52,3 +58,29 @@ def stage_max_tokens(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def stage_timeout_seconds(name: str, default_ms: int = 1000) -> float:
+    """读取某个 Router 子阶段的硬超时，并转换成秒。
+
+    中文注释：
+    .env 里使用毫秒是因为入口层预算通常按 ms 管理；
+    urllib.request.urlopen(...) 使用秒，所以这里统一做换算。
+
+    例子：
+
+        BEGINNER_AGENT_ROUTER_INTENT_TIMEOUT_MS=1200
+
+    会变成：
+
+        timeout_seconds = 1.2
+    """
+
+    load_project_env()
+    try:
+        value = int(os.getenv(name, str(default_ms)))
+    except ValueError:
+        value = default_ms
+    if value <= 0:
+        value = default_ms
+    return value / 1000

@@ -48,6 +48,7 @@ TASK_TYPES: tuple[TaskType, ...] = ("search", "write", "chat", "agent")
 # 一旦命中，就走 fallback 本地规则。
 ROUTER_FALLBACK_ERRORS = (
     RuntimeError,
+    TimeoutError,
     ValueError,
     json.JSONDecodeError,
     AttributeError,

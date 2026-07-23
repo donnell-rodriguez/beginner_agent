@@ -109,6 +109,7 @@ def chat_completion(
     temperature: float = 0.2,
     max_tokens: int = 512,
     model: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     # 中文注释：
     # base_url.rstrip("/") 去掉末尾多余的斜杠。
@@ -180,9 +181,13 @@ def chat_completion(
         # 中文注释：
         # urlopen(...) 真正发起 HTTP 请求。
         #
-        # timeout=120 表示最多等待 120 秒。
-        # 本地大模型首次加载可能比较慢，所以这里给长一点。
-        with urllib.request.urlopen(request, timeout=120) as response:
+        # timeout 表示最多等待多少秒。
+        #
+        # 中文注释：
+        # 普通聊天可以等待久一点，但 Router 是入口层，不能被模型长时间卡住。
+        # 所以 Router 会从 .env 传入更短的 timeout_seconds。
+        # 如果调用方不传，就保留 120 秒作为普通 LLM 调用默认值。
+        with urllib.request.urlopen(request, timeout=timeout_seconds or 120) as response:
             # 中文注释：
             # response.read() 读取响应 bytes。
             # decode("utf-8") 转回字符串。
@@ -198,6 +203,12 @@ def chat_completion(
         # URLError 通常表示连接不上服务。
         # 例如 OMLX 没启动、端口不对、网络被阻止。
         raise RuntimeError(f"无法连接 OMLX 服务：{exc}") from exc
+    except TimeoutError as exc:
+        # 中文注释：
+        # TimeoutError 表示这次请求超过了调用方允许等待的时间。
+        # Router 捕获到 RuntimeError 后会进入 fallback，
+        # 这样入口分流不会因为某个模型阶段超时而卡住整个 agent。
+        raise RuntimeError(f"OMLX 请求超时：timeout_seconds={timeout_seconds or 120}") from exc
 
     # 中文注释：
     # json.loads(...) 把响应 JSON 字符串转回 Python dict。
