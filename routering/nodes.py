@@ -402,6 +402,7 @@ def router_classifier_node(state: State) -> dict[str, Any]:
         conflict_count=len(conflicts),
         human_review_required=review_item is not None,
     )
+    # 因为 RouterEvent 大概率是 frozen dataclass，所以不能直接改字段，要用 replace 生成一个更新后的新对象。
     event = replace(
         event,
         metrics_snapshot=metrics_snapshot.as_dict(),

@@ -41,6 +41,9 @@ def run_llm_security_classifier(
     *,
     local_security: RouterSecuritySignal,
     prompt: RouterPromptSpec,
+    # chat_completion 是一个函数/可调用对象；
+    # 它可以接收任意参数；
+    # 它返回 str 字符串。
     chat_completion: Callable[..., str],
 ) -> tuple[RouterSecuritySignal, RouterStageDecision | None]:
     """运行 LLM Security Classifier，并和本地安全信号保守合并。"""
